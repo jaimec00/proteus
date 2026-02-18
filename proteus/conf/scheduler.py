@@ -7,8 +7,8 @@ from omegaconf import II
 class SqrtScheduler(SchedulerCfg):
     d_model: int = II("model.d_model")
     lr_type: str = "sqrt"
-    lr_step: float = 3.0e-5
-    warmup_steps: int = 6000
+    lr_step: float = 5e-5
+    warmup_steps: int = 5_000
 
 @dataclass
 class StaticScheduler(SchedulerCfg):

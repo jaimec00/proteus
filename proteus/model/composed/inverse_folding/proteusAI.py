@@ -33,9 +33,8 @@ class proteusAI(Base):
 
     def forward(self, data_batch: DataBatch) -> Float[T, "BL AA"]:
 
-        # aas, is_masked = self.masker.mask_labels(labels=data_batch.labels, also_mask=data_batch.seq_mask)
-        # data_batch.loss_mask &= is_masked
-        aas = data_batch.labels
+        aas, is_masked = self.masker.mask_labels(labels=data_batch.labels, also_mask=data_batch.seq_mask)
+        data_batch.loss_mask &= is_masked
 
         wf = self.tokenizer(
             data_batch.coords_ca, 
@@ -55,5 +54,6 @@ class proteusAI(Base):
         return {
             "seq_logits": seq_logits, 
             "seq_labels": data_batch.labels, 
-            "loss_mask": data_batch.loss_mask
+            "loss_mask": data_batch.loss_mask,
+            "aa_magnitudes": self.tokenizer.aa_magnitudes,
         }

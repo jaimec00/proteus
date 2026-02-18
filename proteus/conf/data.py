@@ -31,7 +31,7 @@ class SmallSeqData(DefaultData):
 
 @dataclass
 class MediumSeqData(DefaultData):
-    batch_tokens: int = 32768
+    batch_tokens: int = 16384
     max_seq_size: int = 1024
 
 @dataclass
@@ -41,8 +41,9 @@ class LargeSeqData(DefaultData):
 
 @dataclass
 class XLargeSeqData(DefaultData):
-    batch_tokens: int = 16384
+    batch_tokens: int = 32768
     max_seq_size: int = 16384
+    min_seq_size: int = 4096
 
 
 def register_data():

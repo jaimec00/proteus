@@ -49,9 +49,14 @@ Configure path in `configs/data/default.yaml`.
 - CUDA 12.0+ required for GPU training
 - Flash attention 2.8+ for transformer
 - Custom Triton kernels for anglogram loss (fused forward/backward)
+- **Never call `.item()`, `.cpu()`, or `.numpy()` on tensors in the training loop.** These force a CPU/GPU sync and stall the pipeline. Only sync at explicit logging boundaries (e.g. `get_metrics`).
+
+## Code Style
+
+- **Indentation: tabs, not spaces.** All Python files in this repo use tabs.
+- make the code clean and readable, prefer a single descriptive comment above a code block over comments on every line
+- use the conventions already in place (types, shapes, lowercase comments)
 
 ## Important Notes
 
-make sure to use the skills and subagents you have available to delegate tasks. 
-make the code clean and readable, prefer a single descriptive comment above a code block over comments on every line
-use the conventions already in place (types, shapes, lowercase comments)
+make sure to use the skills and subagents you have available to delegate tasks.

@@ -31,7 +31,7 @@ class LoggerCfg:
 	log_system_metrics: bool = True
 	system_metrics_sample_interval: int = 10 # seconds between each system metric collection
 	system_metrics_log_interval: int = 1 # number of samples to collect before aggregating
-	log_interval: int = 10 # number of steps to log training at, no aggregation, just a sample
+	log_interval: int = 10 # number of steps between each training metric log, metrics are accumulated over this period
 
 class Logger():
 
@@ -52,13 +52,6 @@ class Logger():
 		else:
 			mlflow.disable_system_metrics_logging()
 		
-
-	def log_losses(self, losses_dict, mode="train"):
-
-		for loss_type, loss in losses_dict.items():
-			self.log.info(f"{mode} {loss_type} per token: {str(loss)}")	
-		self.log.info("")
-			
 
 	def log_step(self, step_metrics, step):
 		mlflow.log_metrics(metrics=step_metrics, step=step)

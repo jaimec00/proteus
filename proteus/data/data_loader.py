@@ -5,7 +5,7 @@ from __future__ import annotations
 from torch.utils.data import IterableDataset, DataLoader
 import torch
 
-from typing import Generator, Tuple, Any
+from typing import Generator, Tuple, Optional, Any
 from dataclasses import dataclass, field
 from pathlib import Path
 import pandas as pd
@@ -138,7 +138,7 @@ class Data(IterableDataset):
 			buffer_size=config.buffer_size
 		)
 
-	def _get_asmb(self, row: pd.Series) -> Assembly:
+	def _get_asmb(self, row: pd.Series) -> Optional[Assembly]:
 
 		# get pdb and chain name
 		pdb, chain = row.CHAINID.split("_")
@@ -164,7 +164,7 @@ class Data(IterableDataset):
 
 			# add the sample, only yields if batch is ready
 			sample = self._get_asmb(row)
-			if sample:
+			if sample is not None:
 				yield from batch_builder.add_sample(sample)
 
 		# drain the buffer and yield last batches

@@ -27,14 +27,9 @@ class WaveFunctionTokenizer(Base):
 		super().__init__()
 
 		wl = cfg.min_wl + ((cfg.max_wl-cfg.min_wl) * ((torch.logspace(0,1,cfg.d_wf//2, cfg.base_wl) - 1) / (cfg.base_wl-1)))
-		wn = torch.log(torch.pi*2/wl)
-		self.register_buffer("wavenumbers", wn)
-		# self.aa_magnitudes = nn.Embedding(len(alphabet), cfg.d_wf//2)
+		self.register_buffer("wavenumbers", torch.pi*2/wl)
 		self.aa_magnitudes = nn.Parameter(torch.zeros(cfg.d_wf//2, len(alphabet)), requires_grad=True)
 		self.up_proj = UpsampleMLP(cfg.up_proj)
-
-	def _get_wavenumbers(self):
-		return torch.exp(self.wavenumbers) # learns log of wavenumbers, ie log(2pi/lambda) = log(2pi) - log(lambda), log(2pi) is constant, so learning -log(lambda)
 
 	def forward(
 		self, 
@@ -45,11 +40,9 @@ class WaveFunctionTokenizer(Base):
 	):
 
 		if self.training and torch.is_grad_enabled() and self.aa_magnitudes.requires_grad:
-			# wf = wf_embedding_learn_aa(coords_alpha, coords_beta, aas, self.aa_magnitudes.weight.T, self._get_wavenumbers(), cu_seqlens)
-			wf = wf_embedding_learn_aa(coords_alpha, coords_beta, aas, self.aa_magnitudes, self._get_wavenumbers(), cu_seqlens)
+			wf = wf_embedding_learn_aa(coords_alpha, coords_beta, aas, self.aa_magnitudes, self.wavenumbers, cu_seqlens)
 		else:
-			# wf = wf_embedding_static_aa(coords_alpha, coords_beta, aas, self.aa_magnitudes.weight.T, self._get_wavenumbers(), cu_seqlens)
-			wf = wf_embedding_static_aa(coords_alpha, coords_beta, aas, self.aa_magnitudes, self._get_wavenumbers(), cu_seqlens)
+			wf = wf_embedding_static_aa(coords_alpha, coords_beta, aas, self.aa_magnitudes, self.wavenumbers, cu_seqlens)
 
 		tokens = self.up_proj(wf)
 

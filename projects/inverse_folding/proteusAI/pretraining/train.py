@@ -19,7 +19,7 @@ from proteus.types import Any
 
 defaults = [
     "_self_",
-    {"data": "medium_seq"},
+    {"data": "extra_large_seq"},
     {"logger": "default"},
     {"losses": "cel_loss"},
     {"optim": "adamw"},
@@ -38,9 +38,9 @@ class proteusAIPretrainCfg(TrainingRunCfg):
 D_MODEL = 512
 D_WF = 256
 MIN_WL, MAX_WL, BASE_WL = 3.0, 15.0, 20.0
-HEADS = 16
+HEADS = 8
 TRANSFORMER_LAYERS = 32
-MASK_RATE = 0.15
+MASK_RATE = 0.0 # still doing initial experiments, no masking
 
 @dataclass
 class SimpleModel(proteusAIPretrainCfg):

@@ -23,7 +23,9 @@
       "Bash(pixi --version:*)",
       "WebSearch",
       "Bash(pixi install:*)",
-      "Bash(pixi clean:*)"
+      "Bash(pixi clean:*)",
+      "Bash(python3:*)",
+      "Bash(grep:*)"
     ]
   }
 }

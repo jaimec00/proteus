@@ -128,7 +128,9 @@ class BatchBuilder:
 
 		# if not empty, yield the last batch
 		if self._cur_batch:
-			yield DataBatch(self._cur_batch)
+			data_batch = DataBatch(self._cur_batch)
+			if not data_batch.is_empty:
+				yield data_batch
 
 	def _add_buffer(self, asmb: Assembly) -> None:
 		insort(self._buffer, asmb, key=len)
@@ -170,7 +172,10 @@ class DataBatch:
 		tot_tokens = 0
 
 		for idx, asmb in enumerate(batch_list):
-			for key, value in asmb.construct().items():
+			constructed = asmb.construct()
+			if constructed is None:
+				continue
+			for key, value in constructed.items():
 				tokens = value.size(0)
 				if not tokens:
 					break
@@ -267,7 +272,7 @@ class PDBData:
 		self._homo_thresh: float = cfg.homo_thresh
 		self._asymmetric_units_only: bool = cfg.asymmetric_units_only
 
-	def sample_asmb(self, chain: str) -> Assembly:
+	def sample_asmb(self, chain: str) -> Optional[Assembly]:
 		
 		# sample an asmb that contains this chain
 		asmb_id = random.choice(self._get_chain(chain)["asmb_ids"])
@@ -322,7 +327,7 @@ class PDBData:
 		# init the assembly, also applies the xform and takes care of cropping based on max size
 		asmb = Assembly(coords, labels, atom_mask,
 						chain_info, trgt_chain_idx, homo_chains,
-						asmb_xform, self._max_seq_size
+						asmb_xform, self._max_seq_size, self._min_seq_size
 					)
 
 		return asmb
@@ -371,7 +376,7 @@ class PDBData:
 class Assembly:
 	def __init__(self, 	coords: Float[A, "L 14 3"], labels: Int[A, "L"], atom_mask: Bool[A, "L 14"],
 						chain_info: List[Tuple[int, int]], trgt_chain: int, homo_chains: Int[A, "H"],
-						asmb_xform: Float[A, "N 4 4"], max_seq_size: int
+						asmb_xform: Float[A, "N 4 4"], max_seq_size: int, min_seq_size: int = 0
 					) -> None:
 
 		self.coords = coords
@@ -382,12 +387,13 @@ class Assembly:
 		self._trgt_chain = trgt_chain
 		self._homo_chains = homo_chains
 
-		self.asmb_xform = asmb_xform  
+		self.asmb_xform = asmb_xform
+		self._min_seq_size = min_seq_size
 
 		self._crop(max_seq_size)
 
 	@torch.no_grad()
-	def construct(self) -> None:
+	def construct(self) -> Optional[Dict[str, T]]:
 
 		coords = torch.from_numpy(self.coords).float()
 		labels = torch.from_numpy(self.labels).long()
@@ -426,9 +432,15 @@ class Assembly:
 		homo_mask = torch.isin(chain_idx, torch.from_numpy(self._homo_chains))
 		caa_mask = labels != aa_2_lbl("X")  # L
 
-		return ConstructRegistry.construct(
+		result = ConstructRegistry.construct(
 			coords, labels, seq_idx, chain_idx, trgt_mask, homo_mask, caa_mask, atom_mask
 		)
+
+		# filter after invalids removed and xforms applied
+		if result["labels"].size(0) < self._min_seq_size:
+			return None
+
+		return result
 
 		
 	@torch.no_grad()

@@ -14,7 +14,11 @@ class Masker:
 
     def mask_labels(self, labels: Int[T, "BL"], also_mask: Bool[T, "BL"]) -> Tuple[Int[T, "BL"], Bool[T, "BL"]]:
         
-        # for now just make it uniform masking at 15%
-        is_masked = (torch.rand_like(labels, dtype=torch.float) <= self.mask_rate) | also_mask
-        masked_labels = labels.masked_fill(is_masked, aa_2_lbl("<mask>"))
+        if self.mask_rate == 0.0: # not bert style, just predict aa directly
+            is_masked = torch.ones_like(also_mask)
+            masked_labels = labels
+        else:
+            is_masked = (torch.rand_like(labels, dtype=torch.float) <= self.mask_rate) | also_mask
+            masked_labels = labels.masked_fill(is_masked, aa_2_lbl("<mask>"))
+            
         return masked_labels, is_masked

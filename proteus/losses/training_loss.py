@@ -1,153 +1,252 @@
 from __future__ import annotations
 
+import dataclasses
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import CrossEntropyLoss
-import numpy as np
-import math
 
-from proteus.static.constants import canonical_aas
-from typing import Dict, List, Tuple, Any, Union
+from proteus.static.constants import lbl_2_aa
+from typing import Dict, List, Optional, Tuple, Any
 from proteus.types import Float, Int, Bool, T
 
 from dataclasses import dataclass, field
-from omegaconf import MISSING
-from collections import defaultdict
+from omegaconf import MISSING, OmegaConf, DictConfig
 
 # ----------------------------------------------------------------------------------------------------------------------
-# losses 
+# config dataclasses
+
+@dataclass
+class LossTermCfg:
+	fn: str = MISSING
+	inputs: List[str] = MISSING
+	kwargs: Dict[str, float] = field(default_factory=dict)
+	weight: float = 0.0
+	reductions: List[str] = field(default_factory=lambda: ["sum"])
 
 @dataclass
 class LossFnCfg:
-	weights: Dict[str, float] = MISSING
-	loss_fns: Dict[str, str] = MISSING
-	inputs: Dict[str, List[Any]] = MISSING
+	pass
+
+# ----------------------------------------------------------------------------------------------------------------------
+# loss output
+
+@dataclass
+class LossOutput:
+	full_loss: torch.Tensor
+	values: Dict[str, torch.Tensor]
+	counts: Dict[str, torch.Tensor]
+
+# ----------------------------------------------------------------------------------------------------------------------
+# loss holder
+
+class LossHolder:
+	"""running accumulator for loss outputs — all ops stay on-device until get_metrics()"""
+
+	def __init__(self) -> None:
+		self.values: Dict[str, torch.Tensor] = {}
+		self.counts: Dict[str, torch.Tensor] = {}
+		self._last_full_loss: Optional[torch.Tensor] = None
+		# data metrics
+		self.total_tokens: int = 0
+		self.total_loss_tokens: Optional[torch.Tensor] = None
+		self.total_samples: int = 0
+		self.num_batches: int = 0
+
+	def add(self, output: LossOutput) -> None:
+		"""accumulate loss output in-place, no cpu syncs"""
+		self._last_full_loss = output.full_loss
+		for k, v in output.values.items():
+			reduction = k.split("/")[1]
+			if k not in self.values:
+				self.values[k] = v.clone()
+				self.counts[k] = output.counts[k].clone()
+			elif reduction == "max":
+				self.values[k] = torch.maximum(self.values[k], v)
+			elif reduction == "min":
+				self.values[k] = torch.minimum(self.values[k], v)
+			elif reduction == "last":
+				self.values[k] = v.clone()
+				self.counts[k] = output.counts[k].clone()
+			else:
+				self.values[k] = self.values[k] + v
+				self.counts[k] = self.counts[k] + output.counts[k]
+
+	def add_data(self, data_batch) -> None:
+		"""accumulate data metrics from a batch"""
+		self.total_tokens += data_batch.tokens
+		loss_tokens = data_batch.loss_tokens
+		if self.total_loss_tokens is None:
+			self.total_loss_tokens = loss_tokens.clone()
+		else:
+			self.total_loss_tokens = self.total_loss_tokens + loss_tokens
+		self.total_samples += data_batch.samples
+		self.num_batches += 1
+
+	def get_metrics(self) -> Dict[str, float]:
+		"""final reduction — single cpu/gpu sync point for logging"""
+		metrics = {}
+		for k in self.values:
+			reduction = k.split("/")[1]
+			if reduction in ("max", "min", "last"):
+				metrics[k] = self.values[k].item()
+			else:
+				metrics[k] = self.values[k].item() / max(1, self.counts[k].item())
+		return metrics
+
+	def get_last_loss(self) -> torch.Tensor:
+		return self._last_full_loss
+
+	def clear(self) -> None:
+		self.values.clear()
+		self.counts.clear()
+		self._last_full_loss = None
+		self.total_tokens = 0
+		self.total_loss_tokens = None
+		self.total_samples = 0
+		self.num_batches = 0
+
 
 class TrainingRunLosses:
 
 	def __init__(self, loss_fn_cfg: LossFnCfg) -> None:
-
+		if isinstance(loss_fn_cfg, DictConfig):
+			loss_fn_cfg = OmegaConf.to_object(loss_fn_cfg)
 		self.loss_fn: LossFn = LossFn(loss_fn_cfg)
-		self.train: LossHolder = LossHolder()
-		self.val: LossHolder = LossHolder()
-		self.test: LossHolder = LossHolder()
 		self.tmp: LossHolder = LossHolder()
 
-class LossHolder:
-	'''
-	class to store losses
-	'''
-	def __init__(self) -> None:
-
-		self.losses = defaultdict(list)
-		
-		# to scale losses for logging, does not affect backprop
-		self.valid_toks: Union[int, Int[T, "1"]] = 0 # valid tokens to compute avg per token
-
-	def get_avg(self) -> Dict[str, float]:
-		'''this method is just for logging purposes, does not rescale loss used in bwd pass'''
-		avg_losses = {}
-		for loss_type in self.losses.keys():
-			avg_losses[loss_type] = torch.stack(self.losses[loss_type]).sum() / (self.valid_toks.clamp(min=1) if isinstance(self.valid_toks, torch.Tensor) else max(1, self.valid_toks))
-		avg_losses = {loss_type: loss.item() for loss_type, loss in avg_losses.items()}
-		return avg_losses
-
-	def add_losses(self, losses: Dict[str, Union[torch.Tensor, float]], valid_toks: Int[T, "1"] | int = 1) -> None:
-		for loss_type, loss in losses.items():
-			self.losses[loss_type].append(loss)
-		self.valid_toks += valid_toks
-
-	def extend_losses(self, other: 'LossHolder') -> None:
-		if isinstance(self.valid_toks, torch.Tensor):
-			other.to(self.valid_toks.device)
-		for loss_type, losses in other.losses.items():
-			self.losses[loss_type].extend(losses)
-		self.valid_toks += other.valid_toks
-
-	def to(self, device: str) -> None:
-		self.losses = {loss_type: [loss.to(device) for loss in losses] for loss_type, losses in self.losses.items()}
-		self.valid_toks = self.valid_toks.to(device) if isinstance(self.valid_toks, torch.Tensor) else self.valid_toks
-
-	def clear(self) -> None:
-		self.losses.clear()
-		self.valid_toks = 0
-
-	def get_last_loss(self) -> Union[float, torch.Tensor]:
-		return self.losses["full_loss"][-1]
-
-	def get_last_losses(self, scale: float = 1) -> Dict[str, float]:
-		# .item() causes cpu gpu sync, slows down, but this is only done on logging steps 
-		return {k: (losses[-1]*scale).item() for k, losses in self.losses.items()}
-
-	def __len__(self) -> int:
-		return len(self.losses[list(self.losses.keys())[0]])
-
+# ----------------------------------------------------------------------------------------------------------------------
+# loss function
 
 class LossFn(nn.Module):
 	def __init__(self, cfg: LossFnCfg):
 		super().__init__()
-		self.weights = cfg.weights
-		self.loss_fns = cfg.loss_fns
-		self.inputs = cfg.inputs
+		# discover loss terms from cfg dataclass fields
+		self.terms: Dict[str, LossTermCfg] = {}
+		for f in dataclasses.fields(cfg):
+			val = getattr(cfg, f.name)
+			if isinstance(val, LossTermCfg):
+				assert hasattr(self, val.fn), f"LossFn has no '{val.fn}' method"
+				self.terms[f.name] = val
 
-		for loss_fn in self.loss_fns.values():
-			assert hasattr(self, loss_fn), f"LossFn has no {loss_fn} method"
+	def forward(self, outputs: Dict[str, Any]) -> LossOutput:
+		full_loss = torch.tensor(0.0, device=next(iter(outputs.values())).device if outputs else "cpu")
+		values: Dict[str, torch.Tensor] = {}
+		counts: Dict[str, torch.Tensor] = {}
 
-	def forward(self, outputs: Dict[str, Any]):
+		for term_name, term in self.terms.items():
 
-		losses = {"full_loss": 0.0}
+			# gather inputs
+			args = [outputs[k] for k in term.inputs]
+			fn_result = getattr(self, term.fn)(*args, **term.kwargs)
 
-		for loss_fn_str in self.loss_fns.keys():
+			multi_output = len(fn_result) > 1
+			# first reduction in the list is used for backprop contribution
+			applied_weight = False
 
-			loss_fn = getattr(self, self.loss_fns[loss_fn_str])
-			args, kwargs = self._get_args_kwargs(loss_fn_str, outputs)
-			loss = loss_fn(*args, **kwargs)
+			for fn_key, (unreduced, mask) in fn_result.items():
+				for reduction in term.reductions:
+					scalar, stored, count = self._reduce(unreduced, mask, reduction)
 
-			weight = self.weights[loss_fn_str]
-			if weight:
-				losses["full_loss"] += loss*weight
+					# build the log key: term/reduction or term/reduction/sub_key
+					if multi_output:
+						log_key = f"{term_name}/{reduction}/{fn_key}"
+					else:
+						log_key = f"{term_name}/{reduction}"
 
-			losses[loss_fn_str] = loss
+					# weighted contribution to full_loss (first key, first reduction only)
+					if not applied_weight and term.weight != 0.0:
+						full_loss = full_loss + scalar * term.weight
+						applied_weight = True
 
-		return losses
+					# detach stored values — only used for logging, no need to retain graph
+					values[log_key] = stored.detach()
+					counts[log_key] = count
 
-	def _get_args_kwargs(self, loss_fn_str, outputs):
-		'''
-		the convention here is that args come from the output, kwargs are "hard coded"
-		'''
-		arg_inputs, kwargs = self.inputs[loss_fn_str]
-		args = [outputs[arg] for arg in arg_inputs]
-		return args, kwargs
-		
-	# loss functions
-	def kl_div(self, mu, logvar):
-		...
+				applied_weight = True
 
-	def mse(self, pred, trgt):
-		...
+		# log raw full_loss scalar (count=1 so accumulator averages over batches)
+		values["full_loss/sum"] = full_loss.detach()
+		counts["full_loss/sum"] = full_loss.detach().new_tensor(1)
+
+		return LossOutput(full_loss=full_loss, values=values, counts=counts)
+
+	@staticmethod
+	def _reduce(
+		unreduced: torch.Tensor, mask: torch.Tensor, reduction: str
+	) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+		"""returns (scalar_for_loss, stored_value, count) — all on-device tensors, no CPU syncs"""
+		if reduction == "sum":
+			stored = (unreduced * mask).sum()
+			return stored, stored, mask.new_tensor(1)
+		elif reduction == "mean":
+			count = mask.sum()
+			stored = (unreduced * mask).sum()
+			scalar = stored / count.clamp(min=1)
+			return scalar, stored, count
+		elif reduction == "max":
+			stored = unreduced.masked_fill(mask == 0, float('-inf')).max()
+			return stored, stored, mask.new_tensor(1)
+		elif reduction == "min":
+			stored = unreduced.masked_fill(mask == 0, float('inf')).min()
+			return stored, stored, mask.new_tensor(1)
+		elif reduction == "last":
+			return unreduced, unreduced, mask.new_tensor(1)
+		else:
+			raise ValueError(f"unknown reduction: {reduction}")
+
+	# ----- loss methods — all return Dict[str, Tuple[Tensor, Tensor]] -----
 
 	def cel(self, logits, labels, mask):
-		labels = labels.masked_fill(~mask, -1)
-		cel = F.cross_entropy(logits, labels, ignore_index=-1, reduction="sum")
-
-		return cel
+		labels = labels.masked_fill(~mask, 0)
+		unreduced = F.cross_entropy(logits, labels, reduction="none")
+		return {"cel": (unreduced, mask.float())}
 
 	def focal_loss(self, logits, labels, mask, alpha=1.0, gamma=2.0):
-		labels = labels.masked_fill(~mask, -1)
-		cel = F.cross_entropy(logits, labels, ignore_index=-1, reduction="none")
-		p_t = torch.exp(-cel)  # p_t = exp(log(p_t))
-		focal_weight = (1 - p_t) ** gamma
-		focal_loss = alpha * focal_weight * cel
-
-		return focal_loss.sum()
+		labels = labels.masked_fill(~mask, 0)
+		cel = F.cross_entropy(logits, labels, reduction="none")
+		p_t = torch.exp(-cel)
+		return {"focal_loss": (alpha * (1 - p_t) ** gamma * cel, mask.float())}
 
 	def matches(self, logits, labels, mask):
-		labels = labels.masked_fill(~mask, -1)
-		matches = (torch.argmax(logits, dim=-1) == labels) * mask
-		return matches.sum()
+		return {"matches": ((torch.argmax(logits, dim=-1) == labels).float(), mask.float())}
 
 	def probs(self, logits, labels, mask):
-		labels = labels.masked_fill(~mask, 0)
-		probs = torch.gather(torch.softmax(logits, dim=-1), -1, labels.unsqueeze(-1)).squeeze(-1)*mask
-		return probs.sum()
+		labels_safe = labels.masked_fill(~mask, 0)
+		p = torch.gather(torch.softmax(logits, dim=-1), -1, labels_safe.unsqueeze(-1)).squeeze(-1)
+		return {"probs": (p, mask.float())}
+
+	def aa_magnitudes(self, aa_magnitudes):
+		one = aa_magnitudes.new_tensor(1.0)
+		return {
+			lbl_2_aa(i).replace("<", "").replace(">", ""): (aa_magnitudes[:, i].mean(), one)
+			for i in range(aa_magnitudes.shape[1])
+		}
+
+	def per_label_cel(self, logits, labels, mask):
+		"""cross-entropy loss per amino acid label"""
+		labels_safe = labels.masked_fill(~mask, 0)
+		unreduced = F.cross_entropy(logits, labels_safe, reduction="none")
+		n_labels = logits.shape[-1]
+		return {
+			lbl_2_aa(i).replace("<", "").replace(">", ""): (unreduced, ((labels == i) & mask).float())
+			for i in range(n_labels)
+		}
+
+	def per_label_probs(self, logits, labels, mask):
+		"""predicted probability of the true label, per amino acid"""
+		labels_safe = labels.masked_fill(~mask, 0)
+		p = torch.gather(torch.softmax(logits, dim=-1), -1, labels_safe.unsqueeze(-1)).squeeze(-1)
+		n_labels = logits.shape[-1]
+		return {
+			lbl_2_aa(i).replace("<", "").replace(">", ""): (p, ((labels == i) & mask).float())
+			for i in range(n_labels)
+		}
+
+	def per_label_matches(self, logits, labels, mask):
+		"""accuracy per amino acid label"""
+		correct = (torch.argmax(logits, dim=-1) == labels).float()
+		n_labels = logits.shape[-1]
+		return {
+			lbl_2_aa(i).replace("<", "").replace(">", ""): (correct, ((labels == i) & mask).float())
+			for i in range(n_labels)
+		}

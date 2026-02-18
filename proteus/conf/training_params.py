@@ -13,7 +13,8 @@ class DefaultTrainParams(TrainingParamsCfg):
   grad_clip_norm: float = 5.0
   compile_model: bool = False
   load_from_checkpoint: str = ""
-  checkpoint_interval: int = 5_000
+  reset_state: bool = False
+  checkpoint_interval: int = 2_500
   gc_interval: int = 500
 
 @dataclass
