@@ -1,7 +1,6 @@
 '''
 hold constants that are reused throughout the model here
 '''
-from proteus.static.amber.parse_amber_lib import parse_amber_lib
 import numpy as np
 from enum import StrEnum
 
@@ -72,9 +71,6 @@ def seq_2_lbls(seq: str) -> np.ndarray:
 
     return labels
 
-# now parse the amber partial charges from ff19SB lib file into a dict of {aa3letter: {N: pc, CA: pc, ...}, ...}
-raw_charges = parse_amber_lib()
-
 # now need to define the order that pmpnn uses to define the atoms in their xyz tensor. same order as in PDBs, but the atom types vary per AA
 bb_atoms = ["N", "CA", "C", "O"] # these are always the first four
 atoms = {
@@ -99,20 +95,3 @@ atoms = {
     "TRP": bb_atoms + ["CB", "CG", "CD1", "CD2", "CE2", "CE3", "NE1", "CZ2", "CZ3", "CH2"],
     "TYR": bb_atoms + ["CB", "CG", "CD1", "CD2", "CE1", "CE2", "CZ", "OH"]
 }
-
-# initialize the amber pc tensor
-amber_partial_charges = np.zeros((len(alphabet), max(len(atom_list) for atom_list in atoms.values())))
-
-# loop through atom types in the raw amber dict and assign the pc to the tensor
-for aa, atom_pcs in raw_charges.items():
-    if aa == "HIE":
-        aa = "HIS"  # amber does not include HIS, but HIE is most common form
-    if aa not in atoms.keys(): continue # skip irrrelevant aas
-    for atom, pc in atom_pcs.items():
-        if atom not in atoms[aa]: continue # skip irrelevant atoms, i.e. hydrogens
-        aa_idx = aa_2_lbl(three_2_one[aa])
-        atom_idx = atoms[aa].index(atom)
-        amber_partial_charges[aa_idx, atom_idx] = pc
-
-# X is treated as glycine
-amber_partial_charges[aa_2_lbl("X"), :] = amber_partial_charges[aa_2_lbl("G"), :]

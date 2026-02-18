@@ -14,7 +14,7 @@ import mlflow
 from tqdm import tqdm
 from pathlib import Path
 from dataclasses import dataclass, field
-from omegaconf import OmegaConf as om, DictConfig, MISSING
+from omegaconf import OmegaConf, DictConfig, MISSING
 
 import torch
 
@@ -62,7 +62,7 @@ class TrainingRun:
 
 	def __init__(self, cfg: TrainingRunCfg) -> None:
 
-		om.resolve(cfg)
+		OmegaConf.resolve(cfg)
 
 		self.gpu = torch.device('cuda' if torch.cuda.is_available() else "cpu")
 		self.cpu = torch.device("cpu")
@@ -80,6 +80,7 @@ class TrainingRun:
 		self.accumulation_steps = cfg.training_params.accumulation_steps
 		self.grad_clip_norm = cfg.training_params.grad_clip_norm
 		self.batch_counter = 0
+		self.epoch = 0
 		self.gc_interval = cfg.training_params.gc_interval
 		
 		self.model, self.optim, self.scheduler, cfg = self.maybe_load_checkpoint(cfg)
@@ -180,6 +181,7 @@ class TrainingRun:
 		try:
 			return next(train_iter), train_iter
 		except StopIteration:
+			self.epoch += 1
 			train_iter = iter(self.data.train)
 			return next(train_iter), train_iter
 
@@ -211,7 +213,6 @@ class TrainingRun:
 
 					# update progress bar
 					if self.learn_step:
-
 						self.update_pbar(pbar, data_batch)
 						self.maybe_log_step()
 
@@ -226,7 +227,6 @@ class TrainingRun:
 
 					# validation at intervals
 					if self.run_val():
-						self.log(f"step: {self.last_step}\nlr: {self.last_lr}", fancy=True)
 						self.flush_train_metrics()
 						self.validation()
 						self.set_training()
@@ -238,7 +238,7 @@ class TrainingRun:
 	def validation(self) -> None:
 
 		self.model.eval()
-		self.losses.tmp.clear()
+		self.losses.loss_holder.clear()
 		val_start = time.perf_counter()
 
 		with self.create_pbar(len(self.data.val), "validation progress") as pbar:
@@ -247,16 +247,16 @@ class TrainingRun:
 				self.update_pbar(pbar, data_batch, step=data_batch.samples)
 
 		# log accumulated val metrics to mlflow
-		step_dict, _ = self._build_step_dict(self.losses.tmp, "val", start_ts=val_start)
+		step_dict, _ = self._build_step_dict(self.losses.loss_holder, "val", start_ts=val_start)
 		self.logger.log_step(step_dict, self.last_step)
-		self.losses.tmp.clear()
+		self.losses.loss_holder.clear()
 
 	@torch.no_grad()
 	def test(self) -> None:
 
 		self.model.eval()
 		self.log("starting testing", fancy=True)
-		self.losses.tmp.clear()
+		self.losses.loss_holder.clear()
 		test_start = time.perf_counter()
 
 		with self.create_pbar(len(self.data.test), "test progress") as pbar:
@@ -265,9 +265,9 @@ class TrainingRun:
 				self.update_pbar(pbar, data_batch, step=data_batch.samples)
 
 		# log accumulated test metrics to mlflow
-		step_dict, _ = self._build_step_dict(self.losses.tmp, "test", start_ts=test_start)
+		step_dict, _ = self._build_step_dict(self.losses.loss_holder, "test", start_ts=test_start)
 		self.logger.log_step(step_dict, self.last_step)
-		self.losses.tmp.clear()
+		self.losses.loss_holder.clear()
 
 	def batch_learn(self, data_batch: DataBatch) -> None:
 		self.batch_forward(data_batch)
@@ -276,16 +276,15 @@ class TrainingRun:
 
 	def batch_forward(self, data_batch: DataBatch) -> None:
 
-		# move batch to gpu
 		data_batch.move_to(self.gpu)
 		outputs = self.model(data_batch)
 		loss_output = self.losses.loss_fn(outputs)
-		self.losses.tmp.add(loss_output)
-		self.losses.tmp.add_data(data_batch)
+		self.losses.loss_holder.add(loss_output)
+		self.losses.loss_holder.add_data(data_batch)
 
 	def batch_backward(self, data_batch: DataBatch) -> None:
 
-		loss = self.losses.tmp.get_last_loss()
+		loss = self.losses.loss_holder.get_last_loss()
 		loss.backward()
 
 		if self.learn_step:
@@ -346,16 +345,16 @@ class TrainingRun:
 
 	def flush_train_metrics(self) -> None:
 		"""log accumulated training metrics and reset"""
-		if self.losses.tmp.num_batches == 0:
+		if self.losses.loss_holder.num_batches == 0:
 			return
-		step_dict, ts = self._build_step_dict(self.losses.tmp, "train")
+		step_dict, ts = self._build_step_dict(self.losses.loss_holder, "train")
 		self.logger.log_step(step_dict, self.last_step)
-		self.losses.tmp.clear()
+		self.losses.loss_holder.clear()
 		self.last_ts = ts
 		self.last_logged_step = self.last_step
 
 	def log_params(self, cfg: TrainingRunCfg) -> None:
-		self.logger.log_param("configuration", om.to_yaml(cfg))
+		self.logger.log_param("configuration", OmegaConf.to_yaml(cfg))
 		num_params = sum(p.numel() for p in self.model.parameters())
 		self.logger.log_param("parameters", num_params)
 		self.logger.log_param("run_dir", self.logger.out_path)
@@ -373,7 +372,7 @@ class TrainingRun:
 	def update_pbar(self, pbar: tqdm, data_batch, step=1) -> None:
 		"""Update progress bar with loss and advance by 1 step."""
 		if self.last_step % 10 == 0:
-			pbar.set_postfix(loss=self.losses.tmp.get_last_loss())
+			pbar.set_postfix(loss=self.losses.loss_holder.get_last_loss())
 		pbar.update(step)
 
 	@property

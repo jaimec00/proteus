@@ -25,8 +25,6 @@ from .constants import (
     lbl_2_aa,
     seq_2_lbls,
 
-    # AMBER partial charges and atom orderings
-    amber_partial_charges,
     atoms,
     bb_atoms,
 )
@@ -51,8 +49,6 @@ __all__ = [
     "lbl_2_aa",
     "seq_2_lbls",
 
-    # AMBER data
-    "amber_partial_charges",
     "atoms",
     "bb_atoms",
 ]

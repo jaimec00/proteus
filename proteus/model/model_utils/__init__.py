@@ -3,7 +3,6 @@ from .mlp import (
     FFN, FFNCfg,
     ProjectionHead, ProjectionHeadCfg,
     SeqProjectionHead, SeqProjectionHeadCfg,
-    EdgeMLP, EdgeMLPCfg,
     UpsampleMLP, UpsampleMLPCfg
 )
 __all__ = [
@@ -15,8 +14,6 @@ __all__ = [
     "ProjectionHeadCfg",
     "SeqProjectionHead", 
     "SeqProjectionHeadCfg",
-    "EdgeMLP", 
-    "EdgeMLPCfg",
     "UpsampleMLP", 
     "UpsampleMLPCfg"
 

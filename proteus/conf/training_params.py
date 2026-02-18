@@ -9,7 +9,7 @@ from dataclasses import dataclass
 class DefaultTrainParams(TrainingParamsCfg):
   max_steps: int = 100_000
   val_interval: int = 500
-  accumulation_steps: int = 8
+  accumulation_steps: int = 1
   grad_clip_norm: float = 5.0
   compile_model: bool = False
   load_from_checkpoint: str = ""

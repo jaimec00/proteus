@@ -130,20 +130,6 @@ class SeqProjectionHead(ProjectionHead):
             d_out=len(canonical_aas),
         )
         super().__init__(projection_cfg)
-		
-@dataclass
-class EdgeMLPCfg:
-    d_model: int = II("model.d_pair")
-
-class EdgeMLP(MLP):
-    def __init__(self, cfg: EdgeMLPCfg) -> None:
-        mlp_cfg: MLPCfg = MLPCfg(
-            d_in=cfg.d_model,
-            d_out=cfg.d_model,
-			d_hidden=cfg.d_model,
-			hidden_layers=2,
-        )
-        super().__init__(mlp_cfg)
 
 @dataclass
 class UpsampleMLPCfg:
@@ -151,7 +137,7 @@ class UpsampleMLPCfg:
     d_out: int = II(".d_in")
 
 class UpsampleMLP(MLP):
-    def __init__(self, cfg: EdgeMLPCfg) -> None:
+    def __init__(self, cfg: UpsampleMLPCfg) -> None:
         mlp_cfg: MLPCfg = MLPCfg(
             d_in=cfg.d_in,
             d_out=cfg.d_out,

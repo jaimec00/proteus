@@ -4,10 +4,9 @@ from torch.utils.data import get_worker_info
 from torch.nn.utils.rnn import pad_sequence
 import torch
 
-from typing import List, Dict, Tuple, Generator, Optional, Any
+from bisect import insort, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
-from bisect import insort, bisect_right
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -15,7 +14,7 @@ import hashlib
 import random
 
 from proteus.static.constants import aa_2_lbl, seq_2_lbls
-from proteus.types import A, T, Float, Int, Bool
+from proteus.types import A, T, Float, Int, Bool, List, Dict, Tuple, Generator, Optional, Any
 from proteus.data.construct_registry import ConstructRegistry
 
 
@@ -109,9 +108,7 @@ class BatchBuilder:
 
 		if self._buffer_full():
 			if self._batch_full():
-				data_batch = DataBatch(self._cur_batch)
-				if not data_batch.is_empty:
-					yield data_batch
+				yield from self._yield_batch()
 				self._clear_batch()
 			self._add_batch()
 
@@ -120,17 +117,18 @@ class BatchBuilder:
 		# all assemblies have been batched or in buffer, empty the buffer
 		while self._buffer:
 			if self._batch_full():
-				data_batch = DataBatch(self._cur_batch)
-				if not data_batch.is_empty:
-					yield data_batch
+				yield from self._yield_batch()
 				self._clear_batch()
 			self._add_batch()
 
 		# if not empty, yield the last batch
 		if self._cur_batch:
-			data_batch = DataBatch(self._cur_batch)
-			if not data_batch.is_empty:
-				yield data_batch
+			yield from self._yield_batch()
+
+	def _yield_batch(self):
+		data_batch = DataBatch(self._cur_batch)
+		if not data_batch.is_empty:
+			yield data_batch
 
 	def _add_buffer(self, asmb: Assembly) -> None:
 		insort(self._buffer, asmb, key=len)
@@ -163,12 +161,8 @@ class DataBatch:
 		if not batch_list:
 			raise ValueError()
 
-		needs_pair_cuseqlens = ConstructRegistry.needs_pair_cuseqlens()
-
 		batch_dict = defaultdict(list)
 		seq_lens = []
-		pair_seq_lens = []
-		pair_reduce_idxs = []
 		tot_tokens = 0
 
 		for idx, asmb in enumerate(batch_list):
@@ -181,9 +175,6 @@ class DataBatch:
 					break
 				if key == "labels":
 					seq_lens.append(tokens)
-					if needs_pair_cuseqlens:
-						pair_seq_lens.extend([tokens]*tokens)
-						pair_reduce_idxs.extend([tot_tokens + i for i in range(tokens) for _ in range(tokens)])
 					tot_tokens += tokens
 				batch_dict[key].append(value)
 
@@ -192,21 +183,14 @@ class DataBatch:
 			return 
 
 		seq_lens = torch.tensor(seq_lens, dtype=torch.int, device="cpu")
-		pair_seq_lens = torch.tensor(pair_seq_lens, dtype=torch.int, device="cpu")
-
 		self.max_seqlen = seq_lens.max().item()
 		self.samples = seq_lens.size(0)
 
 		self.cu_seqlens = torch.nn.functional.pad(seq_lens.cumsum(dim=0), pad=(1,0), mode="constant", value=0).int()
-		self.pair_cu_seqlens = torch.nn.functional.pad(pair_seq_lens.cumsum(dim=0), pad=(1,0), mode="constant", value=0).int()
-		self.pair_reduce_idxs = torch.tensor(pair_reduce_idxs, dtype=torch.long, device="cpu")
 		
 		assert "labels" in batch_dict
 		assert "loss_mask" in batch_dict
 		self._tensor_names = list(batch_dict.keys()) + ["cu_seqlens"] 
-		if needs_pair_cuseqlens:
-			self._tensor_names += ["pair_cu_seqlens", "pair_reduce_idxs"]
-
 		for tensor_name, tensor_list in batch_dict.items():
 			tensor = torch.cat(tensor_list, dim=0)
 			setattr(self, tensor_name, tensor)

@@ -68,23 +68,3 @@ class TransformerModel(Base):
 			x = block(q, kv, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
 
 		return x
-
-# just to make interpolation cleaner, packed pairs logic dealt with in dataloader
-@dataclass
-class PairMHACfg(MHACfg):
-	d_model: int = II("model.d_pair")
-
-@dataclass
-class PairFFNCfg(FFNCfg):
-	d_model: int = II("model.d_pair")
-	expansion_factor: int = 2
-
-@dataclass 
-class PairformerBlockCfg(TransformerBlockCfg):
-	d_model: int = II("model.d_pair")
-	attn: PairMHACfg = field(default_factory=PairMHACfg)
-	ffn: PairFFNCfg = field(default_factory=PairFFNCfg)
-
-@dataclass
-class PairformerModelCfg(TransformerModelCfg):
-	transformer_block: PairformerBlockCfg = field(default_factory=PairformerBlockCfg)

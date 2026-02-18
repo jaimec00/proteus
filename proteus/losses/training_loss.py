@@ -6,11 +6,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from proteus.static.constants import lbl_2_aa
-from typing import Dict, List, Optional, Tuple, Any
-from proteus.types import Float, Int, Bool, T
+from proteus.types import Float, Int, Bool, T, Dict, List, Optional, Tuple, Any
 
 from dataclasses import dataclass, field
 from omegaconf import MISSING, OmegaConf, DictConfig
+import enum
+
+class Reductions(enum.StrEnum):
+	SUM = "sum"
+	MEAN = "mean"
+	MAX = "max"
+	MIN = "min"
+	LAST = "last"
 
 # ----------------------------------------------------------------------------------------------------------------------
 # config dataclasses
@@ -21,7 +28,7 @@ class LossTermCfg:
 	inputs: List[str] = MISSING
 	kwargs: Dict[str, float] = field(default_factory=dict)
 	weight: float = 0.0
-	reductions: List[str] = field(default_factory=lambda: ["sum"])
+	reductions: List[str] = field(default_factory=lambda: [Reductions.SUM])
 
 @dataclass
 class LossFnCfg:
@@ -60,11 +67,11 @@ class LossHolder:
 			if k not in self.values:
 				self.values[k] = v.clone()
 				self.counts[k] = output.counts[k].clone()
-			elif reduction == "max":
+			elif reduction == Reductions.MAX:
 				self.values[k] = torch.maximum(self.values[k], v)
-			elif reduction == "min":
+			elif reduction == Reductions.MIN:
 				self.values[k] = torch.minimum(self.values[k], v)
-			elif reduction == "last":
+			elif reduction == Reductions.LAST:
 				self.values[k] = v.clone()
 				self.counts[k] = output.counts[k].clone()
 			else:
@@ -87,7 +94,7 @@ class LossHolder:
 		metrics = {}
 		for k in self.values:
 			reduction = k.split("/")[1]
-			if reduction in ("max", "min", "last"):
+			if reduction in (Reductions.MAX, Reductions.MIN, Reductions.LAST):
 				metrics[k] = self.values[k].item()
 			else:
 				metrics[k] = self.values[k].item() / max(1, self.counts[k].item())
@@ -112,7 +119,7 @@ class TrainingRunLosses:
 		if isinstance(loss_fn_cfg, DictConfig):
 			loss_fn_cfg = OmegaConf.to_object(loss_fn_cfg)
 		self.loss_fn: LossFn = LossFn(loss_fn_cfg)
-		self.tmp: LossHolder = LossHolder()
+		self.loss_holder: LossHolder = LossHolder()
 
 # ----------------------------------------------------------------------------------------------------------------------
 # loss function
@@ -175,21 +182,21 @@ class LossFn(nn.Module):
 		unreduced: torch.Tensor, mask: torch.Tensor, reduction: str
 	) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 		"""returns (scalar_for_loss, stored_value, count) — all on-device tensors, no CPU syncs"""
-		if reduction == "sum":
+		if reduction == Reductions.SUM:
 			stored = (unreduced * mask).sum()
 			return stored, stored, mask.new_tensor(1)
-		elif reduction == "mean":
+		elif reduction == Reductions.MEAN:
 			count = mask.sum()
 			stored = (unreduced * mask).sum()
 			scalar = stored / count.clamp(min=1)
 			return scalar, stored, count
-		elif reduction == "max":
+		elif reduction == Reductions.MAX:
 			stored = unreduced.masked_fill(mask == 0, float('-inf')).max()
 			return stored, stored, mask.new_tensor(1)
-		elif reduction == "min":
+		elif reduction == Reductions.MIN:
 			stored = unreduced.masked_fill(mask == 0, float('inf')).min()
 			return stored, stored, mask.new_tensor(1)
-		elif reduction == "last":
+		elif reduction == Reductions.LAST:
 			return unreduced, unreduced, mask.new_tensor(1)
 		else:
 			raise ValueError(f"unknown reduction: {reduction}")
