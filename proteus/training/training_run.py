@@ -47,6 +47,11 @@ class TrainingParamsCfg:
 	gc_interval: int = 500
 
 @dataclass
+class CheckpointCfg:
+	load_from_checkpoint: str = ""
+	reset_state: bool = False
+
+@dataclass
 class TrainingRunCfg:
 	model: Any = MISSING
 	construct_function: str = MISSING
@@ -57,6 +62,7 @@ class TrainingRunCfg:
 	scheduler: SchedulerCfg = MISSING
 	profiler: ProfilerCfg = MISSING
 	training_params: TrainingParamsCfg = MISSING
+	checkpoint: CheckpointCfg = MISSING
 
 class TrainingRun:
 

@@ -12,8 +12,6 @@ class DefaultTrainParams(TrainingParamsCfg):
   accumulation_steps: int = 1
   grad_clip_norm: float = 5.0
   compile_model: bool = False
-  load_from_checkpoint: str = ""
-  reset_state: bool = False
   checkpoint_interval: int = 2_500
   gc_interval: int = 500
 
@@ -24,7 +22,6 @@ class DebugTrainParams(TrainingParamsCfg):
   accumulation_steps: int = 1
   grad_clip_norm: float = 0.0
   compile_model: bool = False
-  load_from_checkpoint: str = ""
   checkpoint_interval: int = 500
   gc_interval: int = 500
 

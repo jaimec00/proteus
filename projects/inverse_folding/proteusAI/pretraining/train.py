@@ -25,6 +25,7 @@ defaults = [
     {"optim": "adamw"},
     {"scheduler": "sqrt"},
     {"profiler": "no_profile"},
+    {"checkpoint": "no_ckpt"},
     {"training_params": "default"},
 ]
 
