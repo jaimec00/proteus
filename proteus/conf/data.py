@@ -43,7 +43,6 @@ class LargeSeqData(DefaultData):
 class XLargeSeqData(DefaultData):
     batch_tokens: int = 65536
     max_seq_size: int = 16384
-    min_seq_size: int = 4096
 
 
 def register_data():
