@@ -257,3 +257,10 @@ class LossFn(nn.Module):
 			lbl_2_aa(i).replace("<", "").replace(">", ""): (correct, ((labels == i) & mask).float())
 			for i in range(n_labels)
 		}
+
+# allowed losses
+loss_fn_names = [fn for fn in set(dir(nn.Module)) ^ set(dir(LossFn)) if not fn.startswith("_")]
+class LossFnNames(enum.StrEnum):
+	pass
+for loss_fn_name in loss_fn_names:
+	setattr(LossFnNames, loss_fn_name.upper(), loss_fn_name)

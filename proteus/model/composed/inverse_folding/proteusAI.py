@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 
+from proteus.model import OutputNames
 from proteus.model.base import Base
 from proteus.data.data_utils import DataBatch
 from proteus.model.model_utils.mlp import SeqProjectionHead, SeqProjectionHeadCfg
@@ -52,8 +53,8 @@ class proteusAI(Base):
         seq_logits = self.seq_proj_head(latent)
 
         return {
-            "seq_logits": seq_logits, 
-            "seq_labels": data_batch.labels, 
-            "loss_mask": data_batch.loss_mask,
-            "aa_magnitudes": self.tokenizer.aa_magnitudes,
+            OutputNames.SEQ_LOGITS: seq_logits, 
+            OutputNames.SEQ_LABELS: data_batch.labels, 
+            OutputNames.LOSS_MASK: data_batch.loss_mask,
+            OutputNames.AA_MAGNITUDES: self.tokenizer.aa_magnitudes,
         }

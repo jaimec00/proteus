@@ -9,6 +9,14 @@ CONSTRUCT_FUNCTION = None
 class ConstructFunctionNames(enum.StrEnum):
 	PROTEUS = "proteus"
 
+class InputNames(enum.StrEnum):
+	COORDS_CA = "coords_ca"
+	COORDS_CB_UNIT = "coords_cb_unit"
+	LABELS = "labels"
+	SEQ_MASK = "seq_mask"
+	LOSS_MASK = "loss_mask"
+	CU_SEQLENS = "cu_seqlens"
+
 class ConstructRegistry:
 
 	@staticmethod
@@ -57,9 +65,9 @@ class ConstructFunctions:
 		loss_mask = caa_mask & trgt_mask
 
 		return {
-			"coords_ca": coords_ca,
-			"coords_cb_unit": coords_cb_unit,
-			"labels": labels,
-			"seq_mask": seq_mask,
-			"loss_mask": loss_mask,
+			InputNames.COORDS_CA: coords_ca,
+			InputNames.COORDS_CB_UNIT: coords_cb_unit,
+			InputNames.LABELS: labels,
+			InputNames.SEQ_MASK: seq_mask,
+			InputNames.LOSS_MASK: loss_mask,
 		}

@@ -15,7 +15,7 @@ import random
 
 from proteus.static.constants import aa_2_lbl, seq_2_lbls
 from proteus.types import A, T, Float, Int, Bool, List, Dict, Tuple, Generator, Optional, Any
-from proteus.data.construct_registry import ConstructRegistry
+from proteus.data.construct_registry import ConstructRegistry, InputNames
 
 
 @dataclass
@@ -188,9 +188,9 @@ class DataBatch:
 
 		self.cu_seqlens = torch.nn.functional.pad(seq_lens.cumsum(dim=0), pad=(1,0), mode="constant", value=0).int()
 		
-		assert "labels" in batch_dict
-		assert "loss_mask" in batch_dict
-		self._tensor_names = list(batch_dict.keys()) + ["cu_seqlens"] 
+		assert InputNames.LABELS in batch_dict
+		assert InputNames.LOSS_MASK in batch_dict
+		self._tensor_names = list(batch_dict.keys()) + [InputNames.CU_SEQLENS] 
 		for tensor_name, tensor_list in batch_dict.items():
 			tensor = torch.cat(tensor_list, dim=0)
 			setattr(self, tensor_name, tensor)
