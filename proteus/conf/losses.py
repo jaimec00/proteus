@@ -22,6 +22,17 @@ class SeqCelLossFn(LossFnCfg):
 		fn=LossFnNames.AA_MAGNITUDES, inputs=[OutputNames.AA_MAGNITUDES],
 		reductions=[Reductions.LAST],
 	))
+
+	# couple of metrics for seeing logits and wf output outlier
+	wf_raw: LossTermCfg = field(default_factory=lambda: LossTermCfg(
+		fn=LossFnNames.IDENTITY, inputs=[OutputNames.WF_RAW, OutputNames.NO_MASK],
+		reductions=[Reductions.MAX, Reductions.MIN],
+	))
+	logits: LossTermCfg = field(default_factory=lambda: LossTermCfg(
+		fn=LossFnNames.IDENTITY, inputs=[OutputNames.SEQ_LOGITS, OutputNames.LOSS_MASK],
+		reductions=[Reductions.MAX, Reductions.MIN],
+	))
+
 	per_label_cel: LossTermCfg = field(default_factory=lambda: LossTermCfg(
 		fn=LossFnNames.PER_LABEL_CEL, inputs=[OutputNames.SEQ_LOGITS, OutputNames.SEQ_LABELS, OutputNames.LOSS_MASK],
 		reductions=[Reductions.MEAN],

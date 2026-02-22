@@ -37,11 +37,12 @@ class proteusAI(Base):
         aas, is_masked = self.masker.mask_labels(labels=data_batch.labels, also_mask=data_batch.seq_mask)
         data_batch.loss_mask &= is_masked
 
-        wf = self.tokenizer(
+        wf, wf_raw = self.tokenizer(
             data_batch.coords_ca, 
             data_batch.coords_cb_unit,
             aas,
             data_batch.cu_seqlens,
+            return_wf_raw=True,
         )
 
         latent = self.transformer(
@@ -57,4 +58,6 @@ class proteusAI(Base):
             OutputNames.SEQ_LABELS: data_batch.labels, 
             OutputNames.LOSS_MASK: data_batch.loss_mask,
             OutputNames.AA_MAGNITUDES: self.tokenizer.aa_magnitudes,
+            OutputNames.WF_RAW: wf_raw,
+            OutputNames.NO_MASK: torch.ones_like(data_batch.loss_mask)
         }

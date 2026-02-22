@@ -1,5 +1,5 @@
-from . import bert_pairformer
+from . import proteusAI
 
 __all__ = [
-    "bert_pairformer",
+    "proteusAI",
 ]

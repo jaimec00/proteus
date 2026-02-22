@@ -7,12 +7,12 @@ from dataclasses import dataclass
 
 @dataclass
 class DefaultTrainParams(TrainingParamsCfg):
-  max_steps: int = 100_000
+  max_steps: int = 500_000
   val_interval: int = 500
-  accumulation_steps: int = 1
+  accumulation_steps: int = 2
   grad_clip_norm: float = 5.0
   compile_model: bool = False
-  checkpoint_interval: int = 2_500
+  checkpoint_interval: int = 1000
   gc_interval: int = 500
 
 @dataclass

@@ -27,9 +27,10 @@ class ConstructRegistry:
 		CONSTRUCT_FUNCTION = construct_function
 
 	@staticmethod
-	def needs_pair_cuseqlens():
-		ConstructRegistry._assert_set()
-		return CONSTRUCT_FUNCTION in [ConstructFunctionNames.PAIRFORMER]
+	def unset_construct_function():
+		'''this is for when running sweeps, we unset it after the training run finished'''
+		global CONSTRUCT_FUNCTION
+		CONSTRUCT_FUNCTION = None
 
 	@staticmethod
 	def construct(*args):

@@ -182,6 +182,10 @@ class LossFn(nn.Module):
 		unreduced: torch.Tensor, mask: torch.Tensor, reduction: str
 	) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 		"""returns (scalar_for_loss, stored_value, count) — all on-device tensors, no CPU syncs"""
+		mask = mask.reshape((
+			mask.shape 
+			+ tuple(1 for i in range(unreduced.ndim - mask.ndim))
+		))
 		if reduction == Reductions.SUM:
 			stored = (unreduced * mask).sum()
 			return stored, stored, mask.new_tensor(1)
@@ -221,6 +225,9 @@ class LossFn(nn.Module):
 		labels_safe = labels.masked_fill(~mask, 0)
 		p = torch.gather(torch.softmax(logits, dim=-1), -1, labels_safe.unsqueeze(-1)).squeeze(-1)
 		return {"probs": (p, mask.float())}
+
+	def identity(self, x, mask):
+		return {"identity": (x, mask.float())}
 
 	def aa_magnitudes(self, aa_magnitudes):
 		one = aa_magnitudes.new_tensor(1.0)

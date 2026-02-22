@@ -42,7 +42,6 @@ class TrainingParamsCfg:
 	accumulation_steps: int = 1
 	grad_clip_norm: float = 0.0
 	compile_model: bool = False
-	load_from_checkpoint: str = ""
 	checkpoint_interval: int = 1_000
 	gc_interval: int = 500
 
@@ -96,12 +95,13 @@ class TrainingRun:
 			self.log("compiling model...")
 			self.model = torch.compile(self.model, dynamic=True)
 
-		with mlflow.start_run():
+		with mlflow.start_run(run_name = self.logger.run_name):
 			self.last_ts = time.perf_counter()
 			self.last_logged_step = 0
 			self.log_params(cfg)
 			self.train()
 			self.test()
+			ConstructRegistry.unset_construct_function() # so sweeps in the same process work
 			self.log("fin", fancy=True)
 
 	def maybe_load_checkpoint(self, cfg: TrainingRunCfg) -> Tuple[Any, Any, Any, Any]:
@@ -110,9 +110,9 @@ class TrainingRun:
 		OPTIM_YAML = "optim_cfg.yaml"
 		SCHEDULER_YAML = "scheduler_cfg.yaml"
 
-		if cfg.training_params.load_from_checkpoint:
+		if cfg.checkpoint.load_from_checkpoint:
 
-			weights_path = Path(cfg.training_params.load_from_checkpoint)
+			weights_path = Path(cfg.checkpoint.load_from_checkpoint)
 			checkpoint_path = weights_path.parent
 			
 			cfg.model = load_cfg(checkpoint_path / MODEL_YAML)
@@ -179,7 +179,6 @@ class TrainingRun:
 	def run_val(self) -> bool:
 		return (
 			self.last_step % self.val_interval == 0 
-			and self.last_step > self.val_interval
 			and self.learn_step
 		)
 
@@ -290,7 +289,7 @@ class TrainingRun:
 
 	def batch_backward(self, data_batch: DataBatch) -> None:
 
-		loss = self.losses.loss_holder.get_last_loss()
+		loss = self.losses.loss_holder.get_last_loss() / self.accumulation_steps
 		loss.backward()
 
 		if self.learn_step:
@@ -345,9 +344,8 @@ class TrainingRun:
 
 	def maybe_log_step(self) -> None:
 		"""log training metrics if at a log interval boundary"""
-		if self.last_step % self.logger.log_interval != 0:
-			return
-		self.flush_train_metrics()
+		if self.last_step > self.logger.log_interval and self.last_step % self.logger.log_interval == 0:
+			self.flush_train_metrics()
 
 	def flush_train_metrics(self) -> None:
 		"""log accumulated training metrics and reset"""

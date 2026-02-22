@@ -3,12 +3,14 @@ from proteus.training.optim import OptimCfg
 from dataclasses import dataclass
 from hydra.core.config_store import ConfigStore
 
+@dataclass
 class AdamW(OptimCfg):
     beta1: float = 0.9
     beta2: float = 0.999
     eps: float = 1.0e-8
     weight_decay: float = 0.01
 
+@dataclass
 class Adam(OptimCfg):
     beta1: float = 0.9
     beta2: float = 0.999

@@ -26,6 +26,7 @@ import os
 
 @dataclass
 class LoggerCfg:
+	run_name: str = ""
 	experiment_name: str = "debug"
 	overwrite: bool = False
 	log_system_metrics: bool = True
@@ -51,7 +52,8 @@ class Logger():
 			mlflow.set_system_metrics_samples_before_logging(cfg.system_metrics_log_interval)
 		else:
 			mlflow.disable_system_metrics_logging()
-		
+
+		self.run_name = cfg.run_name if cfg.run_name else None
 
 	def log_step(self, step_metrics, step):
 		mlflow.log_metrics(metrics=step_metrics, step=step)

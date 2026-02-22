@@ -21,10 +21,10 @@ class TransformerBlock(Base):
 	def __init__(self, cfg: TransformerBlockCfg) -> None:
 		super().__init__()
 		self.attn = MHA(cfg.attn)
-		self.attn_norm_q = nn.LayerNorm(cfg.d_model)
-		self.attn_norm_kv = nn.LayerNorm(cfg.d_model)
+		self.attn_norm_q = nn.RMSNorm(cfg.d_model)
+		self.attn_norm_kv = nn.RMSNorm(cfg.d_model)
 		self.ffn = FFN(cfg.ffn)
-		self.ffn_norm = nn.LayerNorm(cfg.d_model)
+		self.ffn_norm = nn.RMSNorm(cfg.d_model)
 
 	def forward(
 		self,
@@ -35,7 +35,6 @@ class TransformerBlock(Base):
 		max_seqlen_q: int,
 		max_seqlen_kv: int,
 	) -> Float[T, "BL D"]:
-		# TODO: fix this to support cross attention
 		q = q + self.attn(self.attn_norm_q(q), self.attn_norm_kv(kv), cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
 		q = q + self.ffn(self.ffn_norm(q))
 		return q
@@ -65,6 +64,6 @@ class TransformerModel(Base):
 		) -> Float[T, "BL d_model"]:
 
 		for block in self.blocks:
-			x = block(q, kv, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
+			q = block(q, kv, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
 
-		return x
+		return q

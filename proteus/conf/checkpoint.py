@@ -1,10 +1,12 @@
 from proteus.training.training_run import CheckpointCfg
 
 from dataclasses import dataclass
+from hydra.core.config_store import ConfigStore
 
 @dataclass
 class NoCheckpoint(CheckpointCfg):
-    pass
+    load_from_checkpoint: str = ""
+    reset_state: bool = False
 
 def register_checkpoint():
     cs = ConfigStore.instance()
