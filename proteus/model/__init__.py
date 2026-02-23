@@ -9,6 +9,7 @@ class OutputNames(enum.StrEnum):
     AA_MAGNITUDES = enum.auto()
     WF_RAW = enum.auto()
     NO_MASK = enum.auto()
+    CU_SEQLENS = enum.auto()
 
 __all__ = [
     "Base",

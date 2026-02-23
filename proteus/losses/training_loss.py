@@ -26,7 +26,7 @@ class Reductions(enum.StrEnum):
 class LossTermCfg:
 	fn: str = MISSING
 	inputs: List[str] = MISSING
-	kwargs: Dict[str, float] = field(default_factory=dict)
+	kwargs: Dict[str, Any] = field(default_factory=dict)
 	weight: float = 0.0
 	reductions: List[str] = field(default_factory=lambda: [Reductions.SUM])
 
@@ -263,6 +263,24 @@ class LossFn(nn.Module):
 		return {
 			lbl_2_aa(i).replace("<", "").replace(">", ""): (correct, ((labels == i) & mask).float())
 			for i in range(n_labels)
+		}
+
+	def binned_matches(self, logits, labels, mask, cu_seqlens, bins=((0, 512), (512, 1024))):
+		"""accuracy binned by sequence length"""
+		correct = (torch.argmax(logits, dim=-1) == labels).float()
+		BL = logits.size(0)
+		seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]  # [B]
+
+		# vectorized bin membership: [B, K]
+		bins_t = torch.tensor(bins, device=seq_lens.device)
+		in_bin = (seq_lens.unsqueeze(1) >= bins_t[:, 0]) & (seq_lens.unsqueeze(1) < bins_t[:, 1])
+
+		# expand to per-residue [BL, K] — single repeat_interleave, no sync
+		res_in_bin = torch.repeat_interleave(in_bin, seq_lens.long(), dim=0, output_size=BL)
+
+		return {
+			f"{lo}-{hi}": (correct, (res_in_bin[:, i] & mask).float())
+			for i, (lo, hi) in enumerate(bins)
 		}
 
 # allowed losses

@@ -58,10 +58,11 @@ class proteusAI(Base):
         seq_logits = self.seq_proj_head(latent)
 
         return {
-            OutputNames.SEQ_LOGITS: seq_logits, 
-            OutputNames.SEQ_LABELS: data_batch.labels, 
+            OutputNames.SEQ_LOGITS: seq_logits,
+            OutputNames.SEQ_LABELS: data_batch.labels,
             OutputNames.LOSS_MASK: data_batch.loss_mask,
             OutputNames.AA_MAGNITUDES: self.tokenizer.aa_magnitudes,
             OutputNames.WF_RAW: wf_raw,
-            OutputNames.NO_MASK: torch.ones_like(data_batch.loss_mask)
+            OutputNames.NO_MASK: torch.ones_like(data_batch.loss_mask),
+            OutputNames.CU_SEQLENS: data_batch.cu_seqlens,
         }

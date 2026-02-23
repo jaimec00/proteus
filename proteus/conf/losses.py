@@ -67,7 +67,20 @@ class SeqCEL_AND_SeqCELPerLabel_AND_AAMags(SeqCEL, SeqCELPerLabel, AAMags):
 	pass
 
 @dataclass
+class SeqLenBinnedAcc(LossFnCfg):
+	seq_len_binned_acc: LossTermCfg = field(default_factory=lambda: LossTermCfg(
+		fn=LossFnNames.BINNED_MATCHES,
+		inputs=[OutputNames.SEQ_LOGITS, OutputNames.SEQ_LABELS, OutputNames.LOSS_MASK, OutputNames.CU_SEQLENS],
+		kwargs={"bins": [[0, 128], [128, 256], [256, 512], [512, 768], [768, 1024]]},
+		reductions=[Reductions.MEAN],
+	))
+
+@dataclass
 class SeqCEL_AND_SeqCELPerLabel_AND_AAMags_AND_Outlier(SeqCEL, SeqCELPerLabel, AAMags, Outliers):
+	pass
+
+@dataclass
+class SeqCEL_AND_AAMags_AND_SeqLenBinnedAcc(SeqCEL, AAMags, SeqLenBinnedAcc):
 	pass
 
 def register_losses():
@@ -77,4 +90,5 @@ def register_losses():
 	cs.store(name="cel_perlbl", node=SeqCEL_AND_SeqCELPerLabel, group="losses")
 	cs.store(name="cel_perlbl_aa", node=SeqCEL_AND_SeqCELPerLabel_AND_AAMags, group="losses")
 	cs.store(name="cel_perlbl_aa_outliers", node=SeqCEL_AND_SeqCELPerLabel_AND_AAMags_AND_Outlier, group="losses")
+	cs.store(name="cel_aa_seqbinacc", node=SeqCEL_AND_AAMags_AND_SeqLenBinnedAcc, group="losses")
 

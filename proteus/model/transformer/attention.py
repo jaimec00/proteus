@@ -65,8 +65,8 @@ class MHA(Base):
 		q_dtype = q.dtype
 
 		# project the tensors
-		Q = self.Wq(q).reshape(BL, H, Dk).half().contiguous()
-		KV = self.Wkv(kv).reshape(BL, 2, H, Dk).half().contiguous()
+		Q = self.Wq(q).reshape(BL, H, Dk).bfloat16().contiguous()
+		KV = self.Wkv(kv).reshape(BL, 2, H, Dk).bfloat16().contiguous()
 
 		# dropout if in training
 		dropout_p = self.dropout_p if self.training else 0.0
