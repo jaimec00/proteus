@@ -8,7 +8,7 @@ class DefaultData(DataHolderCfg):
     num_train: int = -1
     num_val: int = -1
     num_test: int = -1
-    batch_tokens: int = 512
+    batch_tokens: int = 65536
     min_seq_size: int = 16
     max_seq_size: int = 512
     max_resolution: float = 3.5
@@ -21,29 +21,19 @@ class DefaultData(DataHolderCfg):
 
 @dataclass
 class XSmallSeqData(DefaultData):
-    batch_tokens: int = 128
     max_seq_size: int = 128
-
 @dataclass
 class SmallSeqData(DefaultData):
-    batch_tokens: int = 512
     max_seq_size: int = 512
-
 @dataclass
 class MediumSeqData(DefaultData):
-    batch_tokens: int = 32768
     max_seq_size: int = 1024
-
 @dataclass
 class LargeSeqData(DefaultData):
-    batch_tokens: int = 8192
     max_seq_size: int = 8192
-
 @dataclass
 class XLargeSeqData(DefaultData):
-    batch_tokens: int = 65536
     max_seq_size: int = 8192
-
 
 def register_data():
     cs = ConfigStore.instance()

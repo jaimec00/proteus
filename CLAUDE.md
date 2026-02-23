@@ -10,22 +10,12 @@ Uses **pixi** (modern conda alternative) for environment management:
 pixi shell                    # Drop into environment (auto-activates)
 pixi shell -e gpu             # GPU environment with CUDA 12 + flash-attn
 pixi shell -e cpu             # CPU env for local dev
-pixi run local_mlflow         # Start MLflow tracking server on localhost:5000
+pixi run serve         # Start MLflow tracking server on localhost:5000
 ```
 
 Environment variables set automatically via pixi:
 - `EXP_DIR`: Experiment directory
 - `MLFLOW_TRACKING_URI`: SQLite DB for MLflow tracking
-
-## Running Tests
-
-```bash
-pixi run pytest tests/                           # All tests
-pixi run pytest tests/test_losses/ -v            # Loss tests with verbose output
-pytest tests/test_losses/test_struct_losses/test_anglogram_loss.py  # Single test file
-```
-
-Note: Some tests (anglogram, distogram) require CUDA.
 
 ### Key Types
 `proteus/types/__init__.py` defines jaxtyping annotations used throughout:
@@ -48,7 +38,6 @@ Configure path in `configs/data/default.yaml`.
 
 - CUDA 12.0+ required for GPU training
 - Flash attention 2.8+ for transformer
-- Custom Triton kernels for anglogram loss (fused forward/backward)
 - **Never call `.item()`, `.cpu()`, or `.numpy()` on tensors in the training loop.** These force a CPU/GPU sync and stall the pipeline. Only sync at explicit logging boundaries (e.g. `get_metrics`).
 
 ## Code Style

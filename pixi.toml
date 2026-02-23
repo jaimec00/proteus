@@ -21,6 +21,7 @@ MLFLOW_DEFAULT_ARTIFACT_ROOT = "$EXP_DIR/artifacts"
 
 [tasks]
 serve = "mlflow server"
+gc_collect = "mlflow gc --backend-store-uri $MLFLOW_BACKEND_STORE_URI --artifacts-destination $MLFLOW_DEFAULT_ARTIFACT_ROOT --tracking-uri $MLFLOW_TRACKING_URI"
 
 [dependencies]
 python = ">=3.12"

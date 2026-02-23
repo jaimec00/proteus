@@ -16,7 +16,6 @@ class Hydra(HydraConf):
       )
     )
   ))
-
   
 def register_hydra():
   cs = ConfigStore.instance()

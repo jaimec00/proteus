@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from hydra.core.config_store import ConfigStore
 
 @dataclass
-class SeqCelLossFn(LossFnCfg):
+class SeqCEL(LossFnCfg):
 	seq_cel: LossTermCfg = field(default_factory=lambda: LossTermCfg(
 		fn=LossFnNames.CEL, inputs=[OutputNames.SEQ_LOGITS, OutputNames.SEQ_LABELS, OutputNames.LOSS_MASK],
 		weight=1.0, reductions=[Reductions.SUM, Reductions.MEAN],
@@ -18,21 +18,9 @@ class SeqCelLossFn(LossFnCfg):
 		fn=LossFnNames.MATCHES, inputs=[OutputNames.SEQ_LOGITS, OutputNames.SEQ_LABELS, OutputNames.LOSS_MASK],
 		reductions=[Reductions.MEAN],
 	))
-	aa_magnitudes: LossTermCfg = field(default_factory=lambda: LossTermCfg(
-		fn=LossFnNames.AA_MAGNITUDES, inputs=[OutputNames.AA_MAGNITUDES],
-		reductions=[Reductions.LAST],
-	))
 
-	# couple of metrics for seeing logits and wf output outlier
-	wf_raw: LossTermCfg = field(default_factory=lambda: LossTermCfg(
-		fn=LossFnNames.IDENTITY, inputs=[OutputNames.WF_RAW, OutputNames.NO_MASK],
-		reductions=[Reductions.MAX, Reductions.MIN],
-	))
-	logits: LossTermCfg = field(default_factory=lambda: LossTermCfg(
-		fn=LossFnNames.IDENTITY, inputs=[OutputNames.SEQ_LOGITS, OutputNames.LOSS_MASK],
-		reductions=[Reductions.MAX, Reductions.MIN],
-	))
-
+@dataclass
+class SeqCELPerLabel(LossFnCfg):
 	per_label_cel: LossTermCfg = field(default_factory=lambda: LossTermCfg(
 		fn=LossFnNames.PER_LABEL_CEL, inputs=[OutputNames.SEQ_LOGITS, OutputNames.SEQ_LABELS, OutputNames.LOSS_MASK],
 		reductions=[Reductions.MEAN],
@@ -46,6 +34,47 @@ class SeqCelLossFn(LossFnCfg):
 		reductions=[Reductions.MEAN],
 	))
 
+@dataclass
+class AAMags(LossFnCfg):
+	aa_magnitudes: LossTermCfg = field(default_factory=lambda: LossTermCfg(
+		fn=LossFnNames.AA_MAGNITUDES, inputs=[OutputNames.AA_MAGNITUDES],
+		reductions=[Reductions.LAST],
+	))
+
+@dataclass
+class Outliers(LossFnCfg):
+	# couple of metrics for seeing logits and wf output outlier
+	wf_raw: LossTermCfg = field(default_factory=lambda: LossTermCfg(
+		fn=LossFnNames.IDENTITY, inputs=[OutputNames.WF_RAW, OutputNames.NO_MASK],
+		reductions=[Reductions.MAX, Reductions.MIN],
+	))
+	logits: LossTermCfg = field(default_factory=lambda: LossTermCfg(
+		fn=LossFnNames.IDENTITY, inputs=[OutputNames.SEQ_LOGITS, OutputNames.LOSS_MASK],
+		reductions=[Reductions.MAX, Reductions.MIN],
+	))
+
+
+@dataclass
+class SeqCEL_AND_AAMags(SeqCEL, AAMags):
+	pass
+
+@dataclass
+class SeqCEL_AND_SeqCELPerLabel(SeqCEL, SeqCELPerLabel):
+	pass
+
+@dataclass
+class SeqCEL_AND_SeqCELPerLabel_AND_AAMags(SeqCEL, SeqCELPerLabel, AAMags):
+	pass
+
+@dataclass
+class SeqCEL_AND_SeqCELPerLabel_AND_AAMags_AND_Outlier(SeqCEL, SeqCELPerLabel, AAMags, Outliers):
+	pass
+
 def register_losses():
 	cs = ConfigStore.instance()
-	cs.store(name="cel_loss", node=SeqCelLossFn, group="losses")
+	cs.store(name="cel", node=SeqCEL, group="losses")
+	cs.store(name="cel_aa", node=SeqCEL_AND_AAMags, group="losses")
+	cs.store(name="cel_perlbl", node=SeqCEL_AND_SeqCELPerLabel, group="losses")
+	cs.store(name="cel_perlbl_aa", node=SeqCEL_AND_SeqCELPerLabel_AND_AAMags, group="losses")
+	cs.store(name="cel_perlbl_aa_outliers", node=SeqCEL_AND_SeqCELPerLabel_AND_AAMags_AND_Outlier, group="losses")
+

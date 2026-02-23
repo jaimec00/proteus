@@ -178,7 +178,7 @@ class TrainingRun:
 
 	def run_val(self) -> bool:
 		return (
-			self.last_step % self.val_interval == 0 
+			((self.last_step+1) % self.val_interval) == 0 
 			and self.learn_step
 		)
 

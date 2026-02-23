@@ -7,7 +7,7 @@ class DefaultLogger(LoggerCfg):
     run_name: str = "${hydra:job.override_dirname}"
     experiment_name: str = "debug"
     overwrite: bool = True
-    log_system_metrics: bool = True
+    log_system_metrics: bool = False
     system_metrics_sample_interval: int = 20
     system_metrics_log_interval: int = 10
     log_interval: int = 50
