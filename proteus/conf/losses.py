@@ -8,7 +8,7 @@ from hydra.core.config_store import ConfigStore
 class SeqCEL(LossFnCfg):
     seq_cel: LossTermCfg = field(default_factory=lambda: LossTermCfg(
         fn=LossFnNames.CEL, inputs=[OutputNames.SEQ_LOGITS, OutputNames.SEQ_LABELS, OutputNames.LOSS_MASK],
-        weight=1.0, reductions=[Reductions.SUM, Reductions.MEAN],
+        weight=1.0, reductions=[Reductions.MEAN, Reductions.SUM],
     ))
     seq_probs: LossTermCfg = field(default_factory=lambda: LossTermCfg(
         fn=LossFnNames.PROBS, inputs=[OutputNames.SEQ_LOGITS, OutputNames.SEQ_LABELS, OutputNames.LOSS_MASK],
@@ -55,18 +55,6 @@ class Outliers(LossFnCfg):
 
 
 @dataclass
-class SeqCEL_AND_AAMags(SeqCEL, AAMags):
-    pass
-
-@dataclass
-class SeqCEL_AND_SeqCELPerLabel(SeqCEL, SeqCELPerLabel):
-    pass
-
-@dataclass
-class SeqCEL_AND_SeqCELPerLabel_AND_AAMags(SeqCEL, SeqCELPerLabel, AAMags):
-    pass
-
-@dataclass
 class SeqLenBinnedAcc(LossFnCfg):
     seq_len_binned_acc: LossTermCfg = field(default_factory=lambda: LossTermCfg(
         fn=LossFnNames.BINNED_MATCHES,
@@ -76,12 +64,17 @@ class SeqLenBinnedAcc(LossFnCfg):
     ))
 
 @dataclass
-class SeqCEL_AND_SeqCELPerLabel_AND_AAMags_AND_Outlier(SeqCEL, SeqCELPerLabel, AAMags, Outliers):
-    pass
-
+class SeqCEL_AND_AAMags(SeqCEL, AAMags): pass
 @dataclass
-class SeqCEL_AND_AAMags_AND_SeqLenBinnedAcc(SeqCEL, AAMags, SeqLenBinnedAcc):
-    pass
+class SeqCEL_AND_SeqCELPerLabel(SeqCEL, SeqCELPerLabel): pass
+@dataclass
+class SeqCEL_AND_SeqCELPerLabel_AND_AAMags(SeqCEL, SeqCELPerLabel, AAMags): pass
+@dataclass
+class SeqCEL_AND_SeqCELPerLabel_AND_AAMags_AND_Outlier(SeqCEL, SeqCELPerLabel, AAMags, Outliers): pass
+@dataclass
+class SeqCEL_AND_AAMags_AND_SeqLenBinnedAcc(SeqCEL, AAMags, SeqLenBinnedAcc): pass
+@dataclass
+class SeqCEL_AND_SeqCELPerLabel_AND_AAMags_AND_SeqLenBinnedAcc(SeqCEL, SeqCELPerLabel, AAMags, SeqLenBinnedAcc): pass
 
 def register_losses():
     cs = ConfigStore.instance()
@@ -91,4 +84,5 @@ def register_losses():
     cs.store(name="cel_perlbl_aa", node=SeqCEL_AND_SeqCELPerLabel_AND_AAMags, group="losses")
     cs.store(name="cel_perlbl_aa_outliers", node=SeqCEL_AND_SeqCELPerLabel_AND_AAMags_AND_Outlier, group="losses")
     cs.store(name="cel_aa_seqbinacc", node=SeqCEL_AND_AAMags_AND_SeqLenBinnedAcc, group="losses")
+    cs.store(name="cel_perlbl_aa_seqbinacc", node=SeqCEL_AND_SeqCELPerLabel_AND_AAMags_AND_SeqLenBinnedAcc, group="losses")
 

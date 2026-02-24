@@ -116,21 +116,20 @@ class TrainingRun:
             checkpoint_path = weights_path.parent
             
             cfg.model = load_cfg(checkpoint_path / MODEL_YAML)
-            if not cfg.training_params.reset_state:
-                cfg.optim = load_cfg(checkpoint_path / OPTIM_YAML)
-                cfg.scheduler = load_cfg(checkpoint_path / SCHEDULER_YAML)
-        
             weights = torch.load(str(weights_path), map_location=self.cpu, weights_only=True)
             model_cls = load_model_cls(cfg.model)
             model = model_cls(cfg.model)
             model.load_state_dict(weights["model"], strict=False)
 
+            if not cfg.checkpoint.reset_state:
+                cfg.optim = load_cfg(checkpoint_path / OPTIM_YAML)
+                cfg.scheduler = load_cfg(checkpoint_path / SCHEDULER_YAML)
+
             optim = setup_optim(cfg.optim, model)
-            if not cfg.training_params.reset_state:
-                optim.load_state_dict(weights["optim"])
-    
             scheduler = setup_scheduler(cfg.scheduler, optim)
-            if not cfg.training_params.reset_state:
+
+            if not cfg.checkpoint.reset_state:
+                optim.load_state_dict(weights["optim"])
                 scheduler.load_state_dict(weights["scheduler"])
 
             # TODO: handle dataloader being in sync with this
@@ -340,6 +339,7 @@ class TrainingRun:
         step_dict = losses_dict | data_dict | throughput_dict
         if prefix == "train":
             step_dict["train/lr"] = self.last_lr
+            step_dict["train/epoch"] = self.epoch
         return step_dict, cur_ts
 
     def maybe_log_step(self) -> None:

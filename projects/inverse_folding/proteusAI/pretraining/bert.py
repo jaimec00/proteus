@@ -21,7 +21,7 @@ defaults = [
     "_self_",
     {"data": "medium_seq"},
     {"logger": "default"},
-    {"losses": "cel_aa"},
+    {"losses": "cel_aa_seqbinacc"},
     {"optim": "adamw"},
     {"scheduler": "sqrt"},
     {"profiler": "no_profile"},
