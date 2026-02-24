@@ -7,68 +7,68 @@ from proteus.utils.struct_utils import get_CA_raw_and_CB_unit, get_backbone
 CONSTRUCT_FUNCTION = None
 
 class ConstructFunctionNames(enum.StrEnum):
-	PROTEUS = "proteus"
+    PROTEUS = "proteus"
 
 class InputNames(enum.StrEnum):
-	COORDS_CA = "coords_ca"
-	COORDS_CB_UNIT = "coords_cb_unit"
-	LABELS = "labels"
-	SEQ_MASK = "seq_mask"
-	LOSS_MASK = "loss_mask"
-	CU_SEQLENS = "cu_seqlens"
+    COORDS_CA = "coords_ca"
+    COORDS_CB_UNIT = "coords_cb_unit"
+    LABELS = "labels"
+    SEQ_MASK = "seq_mask"
+    LOSS_MASK = "loss_mask"
+    CU_SEQLENS = "cu_seqlens"
 
 class ConstructRegistry:
 
-	@staticmethod
-	def set_construct_function(construct_function: str):
-		global CONSTRUCT_FUNCTION
-		ConstructRegistry._assert_not_set()
-		assert construct_function in ConstructFunctionNames
-		CONSTRUCT_FUNCTION = construct_function
+    @staticmethod
+    def set_construct_function(construct_function: str):
+        global CONSTRUCT_FUNCTION
+        ConstructRegistry._assert_not_set()
+        assert construct_function in ConstructFunctionNames
+        CONSTRUCT_FUNCTION = construct_function
 
-	@staticmethod
-	def unset_construct_function():
-		'''this is for when running sweeps, we unset it after the training run finished'''
-		global CONSTRUCT_FUNCTION
-		CONSTRUCT_FUNCTION = None
+    @staticmethod
+    def unset_construct_function():
+        '''this is for when running sweeps, we unset it after the training run finished'''
+        global CONSTRUCT_FUNCTION
+        CONSTRUCT_FUNCTION = None
 
-	@staticmethod
-	def construct(*args):
-		ConstructRegistry._assert_set()
-		return getattr(ConstructFunctions, CONSTRUCT_FUNCTION)(*args)
+    @staticmethod
+    def construct(*args):
+        ConstructRegistry._assert_set()
+        return getattr(ConstructFunctions, CONSTRUCT_FUNCTION)(*args)
 
-	@staticmethod
-	def _assert_set():
-		assert CONSTRUCT_FUNCTION is not None, f"never called ConstructRegistry.set_construct_function, CONSTRUCT_FUNCTION=None"
+    @staticmethod
+    def _assert_set():
+        assert CONSTRUCT_FUNCTION is not None, f"never called ConstructRegistry.set_construct_function, CONSTRUCT_FUNCTION=None"
 
-	@staticmethod
-	def _assert_not_set():
-		assert CONSTRUCT_FUNCTION is None, f"already called ConstructRegistry.set_construct_function, {CONSTRUCT_FUNCTION=}"
+    @staticmethod
+    def _assert_not_set():
+        assert CONSTRUCT_FUNCTION is None, f"already called ConstructRegistry.set_construct_function, {CONSTRUCT_FUNCTION=}"
 
 
 class ConstructFunctions:
 
-	@staticmethod
-	@torch.no_grad()
-	def proteus(
-		coords: Float[T, "L 14 3"], 
-		labels: Int[T, "L"], 
-		seq_idx: Int[T, "L"], 
-		chain_idx: Int[T, "L"], 
-		trgt_mask: Bool[T, "L"], 
-		homo_mask: Bool[T, "L"],
-		caa_mask: Bool[T, "L"],
-		atom_mask: Bool[T, "L"]
-	):
+    @staticmethod
+    @torch.no_grad()
+    def proteus(
+        coords: Float[T, "L 14 3"], 
+        labels: Int[T, "L"], 
+        seq_idx: Int[T, "L"], 
+        chain_idx: Int[T, "L"], 
+        trgt_mask: Bool[T, "L"], 
+        homo_mask: Bool[T, "L"],
+        caa_mask: Bool[T, "L"],
+        atom_mask: Bool[T, "L"]
+    ):
 
-		coords_ca, coords_cb_unit = get_CA_raw_and_CB_unit(coords)
-		seq_mask = homo_mask & ~trgt_mask
-		loss_mask = caa_mask & trgt_mask
+        coords_ca, coords_cb_unit = get_CA_raw_and_CB_unit(coords)
+        seq_mask = homo_mask & ~trgt_mask
+        loss_mask = caa_mask & trgt_mask
 
-		return {
-			InputNames.COORDS_CA: coords_ca,
-			InputNames.COORDS_CB_UNIT: coords_cb_unit,
-			InputNames.LABELS: labels,
-			InputNames.SEQ_MASK: seq_mask,
-			InputNames.LOSS_MASK: loss_mask,
-		}
+        return {
+            InputNames.COORDS_CA: coords_ca,
+            InputNames.COORDS_CB_UNIT: coords_cb_unit,
+            InputNames.LABELS: labels,
+            InputNames.SEQ_MASK: seq_mask,
+            InputNames.LOSS_MASK: loss_mask,
+        }
