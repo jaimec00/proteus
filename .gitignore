@@ -20,3 +20,5 @@ pdb_2021aug02_sample/
 .pixi
 pixi.lock
 .vscode
+docs/_build/
+docs/api/generated/
