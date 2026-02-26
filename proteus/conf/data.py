@@ -16,7 +16,7 @@ class DefaultData(DataHolderCfg):
     asymmetric_units_only: bool = False
     num_workers: int = 16
     prefetch_factor: int = 8
-    rng_seed: int = 42
+    rng_seed: int = 6000
     buffer_size: int = 64
 
 @dataclass

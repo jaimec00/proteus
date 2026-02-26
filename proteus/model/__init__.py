@@ -6,6 +6,7 @@ class OutputNames(enum.StrEnum):
     SEQ_LOGITS = enum.auto()
     SEQ_LABELS = enum.auto()
     LOSS_MASK = enum.auto()
+    IS_MASKED = enum.auto()
     AA_MAGNITUDES = enum.auto()
     WF_RAW = enum.auto()
     NO_MASK = enum.auto()

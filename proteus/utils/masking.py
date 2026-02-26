@@ -1,4 +1,4 @@
-from proteus.static.constants import aa_2_lbl
+from proteus.static.constants import aa_2_lbl, canonical_aas
 from proteus.types import Int, Bool, Tuple, T, Optional
 from dataclasses import dataclass
 import torch
@@ -21,6 +21,11 @@ class Masker:
             masked_labels = labels
         else:
             is_masked = ((torch.rand_like(labels, dtype=torch.float) <= self.mask_rate) | also_mask) & only_mask
-            masked_labels = labels.masked_fill(is_masked, aa_2_lbl("<mask>"))
+            
+            # TODO: make mask method configurable (dedicated mask token vs random aa)
+            # masked_labels = labels.masked_fill(is_masked, aa_2_lbl("<mask>"))
+
+            rand_aas = torch.randint(0, len(canonical_aas), labels.shape, device=labels.device)
+            masked_labels = labels.where(is_masked, rand_aas)
             
         return masked_labels, is_masked

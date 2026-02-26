@@ -40,9 +40,9 @@ D_WF, D_MODEL = 256, 512
 MIN_WL, MAX_WL, BASE_WL = 3.0, 25.0, 20.0
 TRANSFORMER_LAYERS, HEADS = 4, 4
 
-# experiments with no masking to see 
+# experiments with no masking to see
 # minimum capacity needed to make predictions
-MASK_RATE = 0.0 
+MASK_RATE = 0.0
 
 @dataclass
 class proteusAIPretrainTeacherForceCfg(proteusAIPretrainBaseCfg):

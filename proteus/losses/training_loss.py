@@ -23,12 +23,19 @@ class Reductions(enum.StrEnum):
 # config dataclasses
 
 @dataclass
+class MaskCfg:
+    fn: str = MISSING
+    inputs: List[str] = MISSING
+    kwargs: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
 class LossTermCfg:
     fn: str = MISSING
     inputs: List[str] = MISSING
     kwargs: Dict[str, Any] = field(default_factory=dict)
     weight: float = 0.0
     reductions: List[str] = field(default_factory=lambda: [Reductions.SUM])
+    masks: List[MaskCfg] = field(default_factory=list)
 
 @dataclass
 class LossFnCfg:
@@ -133,6 +140,8 @@ class LossFn(nn.Module):
             val = getattr(cfg, f.name)
             if isinstance(val, LossTermCfg):
                 assert hasattr(self, val.fn), f"LossFn has no '{val.fn}' method"
+                for mask_cfg in val.masks:
+                    assert hasattr(self, mask_cfg.fn), f"LossFn has no '{mask_cfg.fn}' mask generator"
                 self.terms[f.name] = val
 
     def forward(self, outputs: Dict[str, Any]) -> LossOutput:
@@ -146,7 +155,15 @@ class LossFn(nn.Module):
             args = [outputs[k] for k in term.inputs]
             fn_result = getattr(self, term.fn)(*args, **term.kwargs)
 
-            multi_output = len(fn_result) > 1
+            # expand with mask generators
+            if term.masks:
+                primary_unreduced, _ = next(iter(fn_result.values()))
+                for mask_cfg in term.masks:
+                    mask_args = [outputs[k] for k in mask_cfg.inputs]
+                    extra_masks = getattr(self, mask_cfg.fn)(*mask_args, **mask_cfg.kwargs)
+                    for name, m in extra_masks.items():
+                        fn_result[name] = (primary_unreduced, m)
+
             # first reduction in the list is used for backprop contribution
             applied_weight = False
 
@@ -154,11 +171,12 @@ class LossFn(nn.Module):
                 for reduction in term.reductions:
                     scalar, stored, count = self._reduce(unreduced, mask, reduction)
 
-                    # build the log key: term/reduction or term/reduction/sub_key
-                    if multi_output:
-                        log_key = f"{term_name}/{reduction}/{fn_key}"
-                    else:
+                    # primary key (matches fn name): term/reduction
+                    # sub-keys: term/reduction/sub_key
+                    if fn_key == term.fn:
                         log_key = f"{term_name}/{reduction}"
+                    else:
+                        log_key = f"{term_name}/{reduction}/{fn_key}"
 
                     # weighted contribution to full_loss (first key, first reduction only)
                     if not applied_weight and term.weight != 0.0:
@@ -236,50 +254,28 @@ class LossFn(nn.Module):
             for i in range(aa_magnitudes.shape[1])
         }
 
-    def per_label_cel(self, logits, labels, mask):
-        """cross-entropy loss per amino acid label"""
-        labels_safe = labels.masked_fill(~mask, 0)
-        unreduced = F.cross_entropy(logits, labels_safe, reduction="none")
+    # ----- mask generators — return Dict[str, Tensor] of named masks -----
+
+    def pass_mask(self, mask, base_mask, name="masked"):
+        return {name: (mask & base_mask).float()}
+
+    def per_label_masks(self, labels, mask, logits):
+        """per amino acid label masks"""
         n_labels = logits.shape[-1]
         return {
-            lbl_2_aa(i).replace("<", "").replace(">", ""): (unreduced, ((labels == i) & mask).float())
+            lbl_2_aa(i).replace("<", "").replace(">", ""): ((labels == i) & mask).float()
             for i in range(n_labels)
         }
 
-    def per_label_probs(self, logits, labels, mask):
-        """predicted probability of the true label, per amino acid"""
-        labels_safe = labels.masked_fill(~mask, 0)
-        p = torch.gather(torch.softmax(logits, dim=-1), -1, labels_safe.unsqueeze(-1)).squeeze(-1)
-        n_labels = logits.shape[-1]
-        return {
-            lbl_2_aa(i).replace("<", "").replace(">", ""): (p, ((labels == i) & mask).float())
-            for i in range(n_labels)
-        }
-
-    def per_label_matches(self, logits, labels, mask):
-        """accuracy per amino acid label"""
-        correct = (torch.argmax(logits, dim=-1) == labels).float()
-        n_labels = logits.shape[-1]
-        return {
-            lbl_2_aa(i).replace("<", "").replace(">", ""): (correct, ((labels == i) & mask).float())
-            for i in range(n_labels)
-        }
-
-    def binned_matches(self, logits, labels, mask, cu_seqlens, bins=((0, 512), (512, 1024))):
-        """accuracy binned by sequence length"""
-        correct = (torch.argmax(logits, dim=-1) == labels).float()
-        BL = logits.size(0)
-        seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]  # [B]
-
-        # vectorized bin membership: [B, K]
+    def binned_masks(self, cu_seqlens, mask, bins=((0, 512), (512, 1024))):
+        """sequence-length bin masks"""
+        BL = mask.size(0)
+        seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
         bins_t = torch.tensor(bins, device=seq_lens.device)
         in_bin = (seq_lens.unsqueeze(1) >= bins_t[:, 0]) & (seq_lens.unsqueeze(1) < bins_t[:, 1])
-
-        # expand to per-residue [BL, K] — single repeat_interleave, no sync
         res_in_bin = torch.repeat_interleave(in_bin, seq_lens.long(), dim=0, output_size=BL)
-
         return {
-            f"{lo}-{hi}": (correct, (res_in_bin[:, i] & mask).float())
+            f"{lo}-{hi}": (res_in_bin[:, i] & mask).float()
             for i, (lo, hi) in enumerate(bins)
         }
 

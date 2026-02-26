@@ -25,7 +25,8 @@
       "Bash(pixi install:*)",
       "Bash(pixi clean:*)",
       "Bash(python3:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(cat -A proteus/model/base.py | grep -n \"^\\\\t\" | head -5 2>/dev/null; cat -A proteus/model/transformer/*.py | grep -n \"^\\\\t\" | head -5 2>/dev/null)"
     ]
   }
 }
