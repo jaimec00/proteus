@@ -7,15 +7,16 @@ from proteus.utils.struct_utils import get_CA_raw_and_CB_unit, get_backbone
 CONSTRUCT_FUNCTION = None
 
 class ConstructFunctionNames(enum.StrEnum):
-    PROTEUS = "proteus"
+    PROTEUS = enum.auto()
 
 class InputNames(enum.StrEnum):
-    COORDS_CA = "coords_ca"
-    COORDS_CB_UNIT = "coords_cb_unit"
-    LABELS = "labels"
-    SEQ_MASK = "seq_mask"
-    LOSS_MASK = "loss_mask"
-    CU_SEQLENS = "cu_seqlens"
+    COORDS_CA = enum.auto()
+    COORDS_CB_UNIT = enum.auto()
+    LABELS = enum.auto()
+    SEQ_MASK = enum.auto()
+    LOSS_MASK = enum.auto()
+    CU_SEQLENS = enum.auto()
+    SAMPLE_IDX = enum.auto()
 
 class ConstructRegistry:
 

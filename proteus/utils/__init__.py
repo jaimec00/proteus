@@ -1,8 +1,9 @@
-from . import profiling, struct_utils, test_utils, checkpoint_utils
+from . import profiling, struct_utils, test_utils, checkpoint_utils, noise_utils
 
 __all__ = [
     "profiling", 
     "struct_utils", 
     "test_utils",
-    "checkpoint_utils"
+    "checkpoint_utils",
+    "noise_utils",
 ]

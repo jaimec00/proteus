@@ -25,6 +25,26 @@ def _per_label():
         inputs=[OutputNames.SEQ_LABELS, OutputNames.LOSS_MASK, OutputNames.SEQ_LOGITS],
     )
 
+def _seqlen_bins():
+    return MaskCfg(
+        fn=LossFnNames.BINNED_MASKS,
+        inputs=[OutputNames.CU_SEQLENS, OutputNames.LOSS_MASK],
+        kwargs={"max_seq_len": "${data.max_seq_size}", "num_bins": 4},
+    )
+
+def _timestep_bins():
+    return MaskCfg(
+        fn=LossFnNames.TIMESTEP_BINNED_MASKS,
+        inputs=[OutputNames.TIMESTEP, OutputNames.LOSS_MASK],
+        kwargs={"max_timestep": "${model.noise_schedule.max_t}", "num_bins": 4},
+    )
+def _is_masked():
+    return MaskCfg(
+        fn=LossFnNames.PASS_MASK,
+        inputs=[OutputNames.IS_MASKED, OutputNames.LOSS_MASK],
+    )
+
+
 @dataclass
 class SeqCELPerLabel(LossFnCfg):
     seq_cel: LossTermCfg = field(default_factory=lambda: LossTermCfg(
@@ -42,13 +62,6 @@ class SeqCELPerLabel(LossFnCfg):
         masks=[_per_label()],
         reductions=[Reductions.MEAN],
     ))
-
-def _seqlen_bins():
-    return MaskCfg(
-        fn=LossFnNames.BINNED_MASKS,
-        inputs=[OutputNames.CU_SEQLENS, OutputNames.LOSS_MASK],
-        kwargs={"bins": [[0, 128], [128, 256], [256, 512], [512, 768], [768, 1024]]},
-    )
 
 @dataclass
 class SeqLenBinned(LossFnCfg):
@@ -68,6 +81,43 @@ class SeqLenBinned(LossFnCfg):
         reductions=[Reductions.MEAN],
     ))
 
+@dataclass
+class TimestepBinned(LossFnCfg):
+    seq_cel: LossTermCfg = field(default_factory=lambda: LossTermCfg(
+        fn=LossFnNames.CEL, inputs=[OutputNames.SEQ_LOGITS, OutputNames.SEQ_LABELS, OutputNames.LOSS_MASK],
+        masks=[_timestep_bins()],
+        weight=1.0, reductions=[Reductions.MEAN, Reductions.SUM],
+    ))
+    seq_probs: LossTermCfg = field(default_factory=lambda: LossTermCfg(
+        fn=LossFnNames.PROBS, inputs=[OutputNames.SEQ_LOGITS, OutputNames.SEQ_LABELS, OutputNames.LOSS_MASK],
+        masks=[_timestep_bins()],
+        reductions=[Reductions.MEAN],
+    ))
+    seq_acc: LossTermCfg = field(default_factory=lambda: LossTermCfg(
+        fn=LossFnNames.MATCHES, inputs=[OutputNames.SEQ_LOGITS, OutputNames.SEQ_LABELS, OutputNames.LOSS_MASK],
+        masks=[_timestep_bins()],
+        reductions=[Reductions.MEAN],
+    ))
+
+
+@dataclass
+class SeqCELMasked(LossFnCfg):
+    seq_cel: LossTermCfg = field(default_factory=lambda: LossTermCfg(
+        fn=LossFnNames.CEL, inputs=[OutputNames.SEQ_LOGITS, OutputNames.SEQ_LABELS, OutputNames.LOSS_MASK],
+        masks=[_is_masked()],
+        weight=1.0, reductions=[Reductions.MEAN, Reductions.SUM],
+    ))
+    seq_probs: LossTermCfg = field(default_factory=lambda: LossTermCfg(
+        fn=LossFnNames.PROBS, inputs=[OutputNames.SEQ_LOGITS, OutputNames.SEQ_LABELS, OutputNames.LOSS_MASK],
+        masks=[_is_masked()],
+        reductions=[Reductions.MEAN],
+    ))
+    seq_acc: LossTermCfg = field(default_factory=lambda: LossTermCfg(
+        fn=LossFnNames.MATCHES, inputs=[OutputNames.SEQ_LOGITS, OutputNames.SEQ_LABELS, OutputNames.LOSS_MASK],
+        masks=[_is_masked()],
+        reductions=[Reductions.MEAN],
+    ))
+    
 # both per-label and seqlen-binned masks on each term
 @dataclass
 class SeqCELPerLabelAndSeqLenBinned(LossFnCfg):
@@ -87,26 +137,21 @@ class SeqCELPerLabelAndSeqLenBinned(LossFnCfg):
         reductions=[Reductions.MEAN],
     ))
 
-def _is_masked():
-    return MaskCfg(
-        fn=LossFnNames.PASS_MASK,
-        inputs=[OutputNames.IS_MASKED, OutputNames.LOSS_MASK],
-    )
 @dataclass
-class SeqCELMasked(LossFnCfg):
+class SeqCELMaskedTimestepBins(LossFnCfg):
     seq_cel: LossTermCfg = field(default_factory=lambda: LossTermCfg(
         fn=LossFnNames.CEL, inputs=[OutputNames.SEQ_LOGITS, OutputNames.SEQ_LABELS, OutputNames.LOSS_MASK],
-        masks=[_is_masked()],
+        masks=[_is_masked(), _timestep_bins()],
         weight=1.0, reductions=[Reductions.MEAN, Reductions.SUM],
     ))
     seq_probs: LossTermCfg = field(default_factory=lambda: LossTermCfg(
         fn=LossFnNames.PROBS, inputs=[OutputNames.SEQ_LOGITS, OutputNames.SEQ_LABELS, OutputNames.LOSS_MASK],
-        masks=[_is_masked()],
+        masks=[_is_masked(), _timestep_bins()],
         reductions=[Reductions.MEAN],
     ))
     seq_acc: LossTermCfg = field(default_factory=lambda: LossTermCfg(
         fn=LossFnNames.MATCHES, inputs=[OutputNames.SEQ_LOGITS, OutputNames.SEQ_LABELS, OutputNames.LOSS_MASK],
-        masks=[_is_masked()],
+        masks=[_is_masked(), _timestep_bins()],
         reductions=[Reductions.MEAN],
     ))
 
@@ -131,7 +176,6 @@ class Outliers(LossFnCfg):
     ))
 
 
-
 @dataclass
 class SeqCEL_AND_AAMags(SeqCEL, AAMags): pass
 @dataclass
@@ -144,6 +188,8 @@ class SeqLenBinned_AND_AAMags(SeqLenBinned, AAMags): pass
 class SeqCELPerLabelAndSeqLenBinned_AND_AAMags(SeqCELPerLabelAndSeqLenBinned, AAMags): pass
 @dataclass
 class SeqCELMasked_AND_AAMags(SeqCELMasked, AAMags): pass
+@dataclass
+class SeqCELMaskedTimestepBins_AND_AAMags(SeqCELMaskedTimestepBins, AAMags): pass
 
 def register_losses():
     cs = ConfigStore.instance()
@@ -156,3 +202,5 @@ def register_losses():
     cs.store(name="cel_perlbl_aa_seqbinacc", node=SeqCELPerLabelAndSeqLenBinned_AND_AAMags, group="losses")
     cs.store(name="cel_masked", node=SeqCELMasked, group="losses")
     cs.store(name="cel_masked_aa", node=SeqCELMasked_AND_AAMags, group="losses")
+    cs.store(name="cel_masked_t_aa", node=SeqCELMaskedTimestepBins_AND_AAMags, group="losses")
+

@@ -8,7 +8,7 @@ from proteus.training import TrainingRun, TrainingRunCfg
 from proteus.conf.register_configs import register_configs
 from proteus.model.composed.inverse_folding.proteusAI import proteusAICfg
 from proteus.model.tokenizer import WaveFunctionTokenizerCfg
-from proteus.utils.masking import MaskerCfg
+from proteus.utils.noise_utils import NoNoiseScheduleCfg
 from proteus.model.transformer import (
     TransformerBlockCfg, 
     TransformerModelCfg, 
@@ -40,10 +40,6 @@ D_WF, D_MODEL = 256, 512
 MIN_WL, MAX_WL, BASE_WL = 3.0, 25.0, 20.0
 TRANSFORMER_LAYERS, HEADS = 4, 4
 
-# experiments with no masking to see
-# minimum capacity needed to make predictions
-MASK_RATE = 0.0
-
 @dataclass
 class proteusAIPretrainTeacherForceCfg(proteusAIPretrainBaseCfg):
     model: proteusAICfg = field(default_factory=lambda: proteusAICfg(
@@ -54,7 +50,7 @@ class proteusAIPretrainTeacherForceCfg(proteusAIPretrainBaseCfg):
             max_wl=MAX_WL, 
             base_wl=BASE_WL
         ),
-        masker=MaskerCfg(mask_rate=MASK_RATE),
+        noise_schedule=NoNoiseScheduleCfg(),
         transformer=TransformerModelCfg(
             transformer_block=TransformerBlockCfg(
                 attn=MHACfg(heads=HEADS)

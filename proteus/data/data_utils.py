@@ -51,9 +51,10 @@ class Sampler:
         self._epoch: int = epoch
         self._big_prime: int = 1_000_003
 
-        # init the df w/ cluster info
-        self._clusters_df: pd.DataFrame = clusters_df
-        self._num_clusters: int = min(cfg.num_clusters if cfg.num_clusters!=-1 else float("inf"), len(clusters_df.CLUSTER.drop_duplicates()))
+        # init the df w/ cluster info, prune if not -1, ie for dataset set size experiments, simple for now, not ideal
+        self._num_clusters = min(cfg.num_clusters if cfg.num_clusters!=-1 else float("inf"), len(clusters_df.CLUSTER.drop_duplicates()))
+        allowed_clusters = clusters_df.CLUSTER.drop_duplicates().iloc[:self._num_clusters]
+        self._clusters_df = clusters_df.loc[clusters_df.CLUSTER.isin(allowed_clusters), :]
 
     def _get_rand_state(self, rng: np.random.Generator) -> int:
         return int(rng.integers(0, 2**32 - 1, dtype=np.uint32))
@@ -81,7 +82,6 @@ class Sampler:
                             .groupby("CLUSTER")
                             .sample(n=1, random_state=self._get_rand_state(rng)) # first sample gets one chain from each cluster
                             .sample(frac=1, random_state=self._get_rand_state(rng)) # second is to randomly shuffle chains
-                            .iloc[:self._num_clusters, :] # only get num clusters
                         )
 
         # each worker only uses its assigned pdbs, via the partition function. ensures no duplicate caches
@@ -182,6 +182,7 @@ class DataBatch:
         if self.is_empty:
             return 
 
+        self.sample_idx = torch.cat([torch.full((i,), idx) for idx, i in enumerate(seq_lens)], dim=0)
         seq_lens = torch.tensor(seq_lens, dtype=torch.int, device="cpu")
         self.max_seqlen = seq_lens.max().item()
         self.samples = seq_lens.size(0)
@@ -190,7 +191,7 @@ class DataBatch:
         
         assert InputNames.LABELS in batch_dict
         assert InputNames.LOSS_MASK in batch_dict
-        self._tensor_names = list(batch_dict.keys()) + [InputNames.CU_SEQLENS] 
+        self._tensor_names = list(batch_dict.keys()) + [InputNames.CU_SEQLENS, InputNames.SAMPLE_IDX] 
         for tensor_name, tensor_list in batch_dict.items():
             tensor = torch.cat(tensor_list, dim=0)
             setattr(self, tensor_name, tensor)

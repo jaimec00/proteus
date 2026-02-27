@@ -267,16 +267,27 @@ class LossFn(nn.Module):
             for i in range(n_labels)
         }
 
-    def binned_masks(self, cu_seqlens, mask, bins=((0, 512), (512, 1024))):
-        """sequence-length bin masks"""
+    def binned_masks(self, cu_seqlens, mask, max_seq_len=1024, num_bins=2):
+        """sequence-length bin masks — equal-width bins from 0 to max_seq_len"""
         BL = mask.size(0)
         seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-        bins_t = torch.tensor(bins, device=seq_lens.device)
-        in_bin = (seq_lens.unsqueeze(1) >= bins_t[:, 0]) & (seq_lens.unsqueeze(1) < bins_t[:, 1])
+        edges = torch.linspace(0, max_seq_len, num_bins + 1, device=seq_lens.device)
+        lo_edges, hi_edges = edges[:-1], edges[1:]
+        in_bin = (seq_lens.unsqueeze(1) >= lo_edges) & (seq_lens.unsqueeze(1) < hi_edges)
         res_in_bin = torch.repeat_interleave(in_bin, seq_lens.long(), dim=0, output_size=BL)
         return {
-            f"{lo}-{hi}": (res_in_bin[:, i] & mask).float()
-            for i, (lo, hi) in enumerate(bins)
+            f"{int(lo_edges[i])}-{int(hi_edges[i])}": (res_in_bin[:, i] & mask).float()
+            for i in range(num_bins)
+        }
+
+    def timestep_binned_masks(self, timesteps, mask, max_timestep=1024, num_bins=4):
+        """timestep bin masks — equal-width bins from 0 to max_timestep"""
+        edges = torch.linspace(0, max_timestep, num_bins + 1, device=timesteps.device)
+        lo_edges, hi_edges = edges[:-1], edges[1:]
+        in_bin = (timesteps.unsqueeze(1) >= lo_edges) & (timesteps.unsqueeze(1) < hi_edges)
+        return {
+            f"t{int(lo_edges[i])}-{int(hi_edges[i])}": (in_bin[:, i] & mask).float()
+            for i in range(num_bins)
         }
 
 # allowed losses

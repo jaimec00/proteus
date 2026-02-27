@@ -11,6 +11,7 @@ class OutputNames(enum.StrEnum):
     WF_RAW = enum.auto()
     NO_MASK = enum.auto()
     CU_SEQLENS = enum.auto()
+    TIMESTEP = enum.auto()
 
 __all__ = [
     "Base",

@@ -8,7 +8,7 @@ from proteus.training import TrainingRun, TrainingRunCfg
 from proteus.conf.register_configs import register_configs
 from proteus.model.composed.inverse_folding.proteusAI import proteusAICfg
 from proteus.model.tokenizer import WaveFunctionTokenizerCfg
-from proteus.utils.noise_utils import ConstantNoiseScheduleCfg
+from proteus.utils.noise_utils import LinearNoiseScheduleCfg
 from proteus.model.transformer import (
     TransformerBlockCfg, 
     TransformerModelCfg, 
@@ -21,7 +21,7 @@ defaults = [
     "_self_",
     {"data": "medium_seq"},
     {"logger": "default"},
-    {"losses": "cel_aa_seqbinacc"},
+    {"losses": "cel_masked_t_aa"},
     {"optim": "adamw"},
     {"scheduler": "sqrt"},
     {"profiler": "no_profile"},
@@ -39,7 +39,7 @@ class proteusAIPretrainBaseCfg(TrainingRunCfg):
 D_WF, D_MODEL = 256, 512
 MIN_WL, MAX_WL, BASE_WL = 3.0, 25.0, 20.0
 TRANSFORMER_LAYERS, HEADS = 4, 4
-MASK_RATE = 0.25
+MAX_T = 10
 
 @dataclass
 class proteusAIPretrainBERTCfg(proteusAIPretrainBaseCfg):
@@ -51,7 +51,7 @@ class proteusAIPretrainBERTCfg(proteusAIPretrainBaseCfg):
             max_wl=MAX_WL, 
             base_wl=BASE_WL
         ),
-        noise_schedule=ConstantNoiseScheduleCfg(mask_rate=MASK_RATE),
+        noise_schedule=LinearNoiseScheduleCfg(max_t=MAX_T),
         transformer=TransformerModelCfg(
             transformer_block=TransformerBlockCfg(
                 attn=MHACfg(heads=HEADS)
@@ -62,9 +62,9 @@ class proteusAIPretrainBERTCfg(proteusAIPretrainBaseCfg):
 
 register_configs()
 cs = ConfigStore.instance()
-cs.store(name="bert", node=proteusAIPretrainBERTCfg)
+cs.store(name="diffusion", node=proteusAIPretrainBERTCfg)
 
-@hydra.main(version_base=None, config_name="bert")
+@hydra.main(version_base=None, config_name="diffusion")
 def main(cfg):
     TrainingRun(cfg)
 
