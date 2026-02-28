@@ -8,11 +8,17 @@ curl -fsSL https://claude.ai/install.sh | bash
 # pixi
 curl -fsSL https://pixi.sh/install.sh | sh
 
-# pymol
-# sudo apt install pymol -y
+# aws
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+sudo ./aws/install
+rm -rf aws awscliv2.zip
 
 # github
 sudo apt install gh -y
+
+# pymol
+# sudo apt install pymol -y
 
 # setup tmux
 git clone --single-branch https://github.com/gpakosz/.tmux.git $HOME/.tmux
