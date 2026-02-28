@@ -2,6 +2,8 @@
 
 # stuff for setup dev on new instances
 
+sudo apt upgrade
+
 # claude
 curl -fsSL https://claude.ai/install.sh | bash
 
@@ -16,9 +18,6 @@ rm -rf aws awscliv2.zip
 
 # github
 sudo apt install gh -y
-
-# pymol
-# sudo apt install pymol -y
 
 # setup tmux
 git clone --single-branch https://github.com/gpakosz/.tmux.git $HOME/.tmux
