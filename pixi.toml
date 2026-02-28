@@ -1,7 +1,7 @@
 [workspace]
 name = "proteus"
 version = "0.0.1"
-description = "Multimodal protein generative model"
+description = "protein generative model"
 channels = ["conda-forge", "nvidia", "pytorch", "bioconda"]
 platforms = ["linux-64"]
 
@@ -11,7 +11,7 @@ gpu = { features = ["gpu"] , solve-group = "gpu" }
 docs = { features = ["docs"], solve-group = "cpu" }
 
 [activation.env]
-EXP_DIR = "$HOME/proteinDiffVirgina/experiments/mlflow"
+EXP_DIR = "$HOME/proteus/experiments/mlflow"
 MLFLOW_HOST = "localhost"
 MLFLOW_PORT = "5000"
 MLFLOW_SERVE_ARTIFACTS = "False"
