@@ -2,7 +2,7 @@
 
 # stuff for setup dev on new instances
 
-sudo apt upgrade
+sudo apt update
 
 # claude
 curl -fsSL https://claude.ai/install.sh | bash
