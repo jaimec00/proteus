@@ -31,7 +31,8 @@
       "WebFetch(domain:gemmi.readthedocs.io)",
       "WebFetch(domain:project-gemmi.github.io)",
       "WebFetch(domain:github.com)",
-      "WebFetch(domain:www.wwpdb.org)"
+      "WebFetch(domain:www.wwpdb.org)",
+      "WebFetch(domain:search.rcsb.org)"
     ]
   }
 }

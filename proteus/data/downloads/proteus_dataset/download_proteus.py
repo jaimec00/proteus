@@ -299,16 +299,55 @@ class ExperimentalDataDownload:
 		return data
 
 	def _get_experimental_ids(self) -> List[str]:
-		url = "https://files.wwpdb.org/pub/pdb/holdings/current_file_holdings.json.gz"
-		logger.info(f"retrieving rcsb metadata at {url} ...")
-		resp = requests.get(url)
+		# query RCSB Search API for PDB IDs matching our method and resolution criteria
+		method_nodes = [
+			{
+				"type": "terminal",
+				"service": "text",
+				"parameters": {
+					"attribute": "rcsb_entry_info.experimental_method",
+					"operator": "exact_match",
+					"value": method,
+				},
+			}
+			for method in self.methods
+		]
+
+		query = {
+			"query": {
+				"type": "group",
+				"logical_operator": "and",
+				"nodes": [
+					{
+						"type": "group",
+						"logical_operator": "or",
+						"nodes": method_nodes,
+					},
+					{
+						"type": "terminal",
+						"service": "text",
+						"parameters": {
+							"attribute": "rcsb_entry_info.resolution_combined",
+							"operator": "less_or_equal",
+							"value": self.max_resolution,
+						},
+					},
+				],
+			},
+			"return_type": "entry",
+			"request_options": {"return_all_hits": True},
+		}
+
+		logger.info("querying RCSB search API for experimental IDs ...")
+		resp = requests.post(
+			"https://search.rcsb.org/rcsbsearch/v2/query",
+			json=query,
+			timeout=120,
+		)
 		resp.raise_for_status()
-
-		with gzip.open(io.BytesIO(resp.content), "rt") as f:
-			holdings = json.load(f)
-		pdbids = list(holdings.keys())
-
-		# TODO: add rcsb search api step to pre filter based on resolution and method
+		results = resp.json()
+		pdbids = [hit["identifier"].upper() for hit in results.get("result_set", [])]
+		logger.info(f"rcsb search returned {len(pdbids)} entries")
 
 		if self.max_entries > 0:
 			pdbids = pdbids[:self.max_entries]
