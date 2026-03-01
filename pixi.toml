@@ -46,6 +46,7 @@ boto3 = "*"
 awscrt = "*"
 cloudpathlib = "*"
 gemmi = "*"
+foldseek = "*"
 
 [pypi-dependencies]
 proteus = { path = ".", editable = true }
