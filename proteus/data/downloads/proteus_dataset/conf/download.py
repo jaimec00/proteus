@@ -21,7 +21,7 @@ class FoldSeekCfg:
 	db_path: str = "${..local_path}/db" # where the foldseek dbs live
 
 	# shared
-	verbosity: int = 3
+	verbosity: int = 1
 
 	# createdb
 	distance_threshold: float = 8.0
@@ -45,7 +45,6 @@ class FoldSeekCfg:
 	split_memory_limit: str = "0" # max memory per split, e.g. "10G". 0 = all available
 	cluster_steps: int = 3 # cascaded clustering steps
 	cluster_reassign: bool = True
-	remove_tmp_files: bool = False
 
 
 @dataclass

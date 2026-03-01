@@ -17,6 +17,7 @@ from tqdm import tqdm
 import omegaconf
 import numpy as np
 import gemmi
+import shutil
 import subprocess
 
 from proteus.types import Dict, List
@@ -37,6 +38,10 @@ class FoldSeek:
 	def __init__(self, cfg: FoldSeekCfg):
 		self.input_path = Path(cfg.input_path)
 		self.db_path = Path(cfg.db_path)
+		self.raw_db_path = self.db_path / "raw_db"
+		self.cluster_db_path = self.db_path / "cluster_db"
+		self.cluster_tsv_path = self.db_path / "clusters.tsv"
+		self.tmp_dir = self.db_path / "tmp"
 
 		# shared
 		self.verbosity = str(cfg.verbosity)
@@ -63,16 +68,16 @@ class FoldSeek:
 		self.split_memory_limit = cfg.split_memory_limit
 		self.cluster_steps = str(cfg.cluster_steps)
 		self.cluster_reassign = str(int(cfg.cluster_reassign))
-		self.remove_tmp_files = str(int(cfg.remove_tmp_files))
 
 	def cluster(self):
 		self.create_db()
-		self.run_foldseek_cluster()
+		clusters = self.run_foldseek_cluster()
+		print(clusters)
 
 	def run_foldseek_cluster(self):
-		raw_db = str(self.db_path / "raw_db")
-		cluster_db = str(self.db_path / "cluster_db")
-		tmp_dir = str(self.db_path / "tmp")
+		raw_db = str(self.raw_db_path)
+		cluster_db = str(self.cluster_db_path)
+		tmp_dir = str(self.tmp_dir)
 
 		cmd = [
 			"foldseek", "cluster",
@@ -94,18 +99,22 @@ class FoldSeek:
 			"--split-memory-limit", self.split_memory_limit,
 			"--cluster-steps", self.cluster_steps,
 			"--cluster-reassign", self.cluster_reassign,
-			"--remove-tmp-files", self.remove_tmp_files,
+			"--remove-tmp-files", "1",
 			"-v", self.verbosity,
 		]
 
-		subprocess.run(cmd)
+		clusters_output = subprocess.run(cmd)
+		clusters_output.check_returncode()
+		if self.tmp_dir.exists():
+			shutil.rmtree(self.tmp_dir)
+		return self.parse_clusters()
 
 	def create_db(self):
 		self.db_path.mkdir(parents=True, exist_ok=True)
 		cmd = [
 			"foldseek", "createdb",
 			str(self.input_path),
-			str(self.db_path / "raw_db"),
+			str(self.raw_db_path),
 			"--db-extraction-mode", "0",              # chain extraction
 			"--input-format", "2",                    # mmCIF
 			"--distance-threshold", self.distance_threshold,
@@ -115,40 +124,56 @@ class FoldSeek:
 			"-v", self.verbosity,
 		]
 
-		subprocess.run(cmd)
+		db_output = subprocess.run(cmd)
+
+		# delete the raw cifs after we create the db
+		db_output.check_returncode() # make sure it worked before we delete everything
+		shutil.rmtree(self.input_path)
 
 	def parse_clusters(self) -> Dict[str, str]:
 		"""returns {chain_id: cluster_representative}"""
-		tsv_path = self.db_path / "clusters.tsv"
-		raw_db = str(self.db_path / "raw_db")
-		cluster_db = str(self.db_path / "cluster_db")
 
-		subprocess.run([
+		raw_db, cluster_db, tsv_path = str(self.raw_db_path), str(self.cluster_db_path), str(self.cluster_tsv_path)
+
+		result = subprocess.run([
 			"foldseek", "createtsv",
-			raw_db, raw_db, cluster_db, str(tsv_path),
+			raw_db, raw_db, cluster_db, tsv_path,
 			"-v", self.verbosity,
 		])
+		result.check_returncode()
+
+		# clean up db files and tmp dir now that we have the tsv
+		for f in self.db_path.glob(self.raw_db_path.name + "*"):
+			f.unlink()
+		for f in self.db_path.glob(self.cluster_db_path.name + "*"):
+			f.unlink()
 
 		clusters = {}
-		for line in tsv_path.read_text().splitlines():
+		for line in self.cluster_tsv_path.read_text().splitlines():
 			rep, member = line.split("\t")
 			clusters[member] = rep
+		self.cluster_tsv_path.unlink()
+
 		return clusters
 
 class DataPipeline:
 	def __init__(self, cfg: DataPipelineCfg):
 		self.experimental_dl = ExperimentalDataDownload(cfg.experimental_dl)
-		self.s3_path = S3Path(cfg.s3_path)
-		self.local_path = Path(cfg.local_path)
 		self.foldseek = FoldSeek(cfg.foldseek)
 		self.foldseek_input_path = Path(cfg.foldseek.input_path)
 		self.foldseek_db_path = Path(cfg.foldseek.db_path)
+		self.s3_path = S3Path(cfg.s3_path)
+		self.local_path = Path(cfg.local_path)
 
 	def download(self):
 		self.experimental_dl.download()
 
 	def cluster(self):
 		self.foldseek.cluster()
+
+	def run(self):
+		self.download()
+		self.cluster()
 
 
 class ExperimentalDataDownload:
