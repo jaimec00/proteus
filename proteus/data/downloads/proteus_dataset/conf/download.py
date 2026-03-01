@@ -11,8 +11,13 @@ class ExperimentalDataDownloadCfg:
 
 	# pipeline
 	semaphore_limit: int = 32
+	chunk_size: int = 1000
 	s3_path: str = "s3://proteus-data-bucket"
 	local_path: str = "/home/ubuntu/proteus/data/tmp"
+
+@dataclass
+class DataPipelineCfg:
+	experimental_dl: ExperimentalDataDownloadCfg = field(default_factory=ExperimentalDataDownloadCfg)
 
 @dataclass
 class DownloadHydra(HydraConf):
@@ -20,5 +25,5 @@ class DownloadHydra(HydraConf):
 
 def register_download_configs():
 	cs = ConfigStore.instance()
-	cs.store("default", ExperimentalDataDownloadCfg)
+	cs.store("default", DataPipelineCfg)
 	cs.store("config", DownloadHydra, group="hydra")

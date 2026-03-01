@@ -22,14 +22,21 @@ from proteus.types import Dict, List
 from proteus.static.constants import resname_2_one, noncanonical_parent, atoms as atom14_order
 from proteus.utils.s3_utils import upload_bytes_to_s3, REGION
 from proteus.data.downloads.proteus_dataset.conf.download import (
+	DataPipelineCfg,
 	ExperimentalDataDownloadCfg,
 	register_download_configs,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-
 register_download_configs()
+
+class DataPipeline:
+	def __init__(self, cfg: DataPipelineCfg):
+		self.experimental_dl = ExperimentalDataDownload(cfg.experimental_dl)
+
+	def download(self):
+		self.experimental_dl.download()
 
 class ExperimentalDataDownload:
 	def __init__(self, cfg: ExperimentalDataDownloadCfg):
@@ -37,6 +44,7 @@ class ExperimentalDataDownload:
 		self.max_resolution = cfg.max_resolution
 		self.max_entries = cfg.max_entries
 		self.semaphore_limit = cfg.semaphore_limit
+		self.chunk_size = cfg.chunk_size
 		self.s3_path = cfg.s3_path
 		self.local_path = Path(cfg.local_path)
 
@@ -56,21 +64,22 @@ class ExperimentalDataDownload:
 			return result
 
 		s3_session = aioboto3.Session()
+		succeeded, failed = 0, 0
 		async with aiohttp.ClientSession() as session, \
 			s3_session.client("s3", region_name=REGION) as s3_client:
-			tasks = [_task(pdb_id, s3_client) for pdb_id in experimental_ids]
-			results = await asyncio.gather(*tasks, return_exceptions=True)
+			for i in range(0, len(experimental_ids), self.chunk_size):
+				chunk = experimental_ids[i:i + self.chunk_size]
+				tasks = [_task(pdb_id, s3_client) for pdb_id in chunk]
+				results = await asyncio.gather(*tasks, return_exceptions=True)
+				for pdb_id, result in zip(chunk, results):
+					if isinstance(result, Exception):
+						logger.error(f"{pdb_id}: {result}")
+						failed += 1
+					elif result is None:
+						failed += 1
+					else:
+						succeeded += 1
 		pbar.close()
-
-		succeeded, failed = 0, 0
-		for pdb_id, result in zip(experimental_ids, results):
-			if isinstance(result, Exception):
-				logger.error(f"{pdb_id}: {result}")
-				failed += 1
-			elif result is None:
-				failed += 1
-			else:
-				succeeded += 1
 
 		logger.info(f"done: {succeeded} succeeded, {failed} skipped out of {len(experimental_ids)}")
 
@@ -308,8 +317,8 @@ def _best_residue(residues):
 
 
 @hydra.main(version_base=None, config_name="default")
-def main(cfg: ExperimentalDataDownloadCfg):
-	downloader = ExperimentalDataDownload(cfg)
+def main(cfg: DataPipeline):
+	downloader = DataPipeline(cfg)
 	downloader.download()
 
 if __name__ == "__main__":
