@@ -14,16 +14,18 @@ import hydra
 from pathlib import Path
 from cloudpathlib import S3Path
 from tqdm import tqdm
-
+import omegaconf
 import numpy as np
 import gemmi
+import subprocess
 
 from proteus.types import Dict, List
 from proteus.static.constants import resname_2_one, noncanonical_parent, atoms as atom14_order
-from proteus.utils.s3_utils import upload_bytes_to_s3, REGION
+from proteus.utils.s3_utils import upload_bytes_to_s3, REGION, get_session
 from proteus.data.downloads.proteus_dataset.conf.download import (
 	DataPipelineCfg,
 	ExperimentalDataDownloadCfg,
+	FoldSeekCfg,
 	register_download_configs,
 )
 
@@ -31,12 +33,123 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 register_download_configs()
 
+class FoldSeek:
+	def __init__(self, cfg: FoldSeekCfg):
+		self.input_path = Path(cfg.input_path)
+		self.db_path = Path(cfg.db_path)
+
+		# shared
+		self.verbosity = str(cfg.verbosity)
+
+		# createdb
+		self.distance_threshold = str(cfg.distance_threshold)
+		self.mask_bfactor_threshold = str(cfg.mask_bfactor_threshold)
+		self.coord_store_mode = str(cfg.coord_store_mode)
+		self.chain_name_mode = str(cfg.chain_name_mode)
+
+		# clustering
+		self.tmscore_threshold = str(cfg.tmscore_threshold)
+		self.tmscore_threshold_mode = str(cfg.tmscore_threshold_mode)
+		self.lddt_threshold = str(cfg.lddt_threshold)
+		self.coverage = str(cfg.coverage)
+		self.cov_mode = str(cfg.cov_mode)
+		self.cluster_mode = str(cfg.cluster_mode)
+		self.sensitivity = str(cfg.sensitivity)
+		self.e_value = str(cfg.e_value)
+		self.max_seqs = str(cfg.max_seqs)
+		self.min_aln_len = str(cfg.min_aln_len)
+		self.max_seq_len = str(cfg.max_seq_len)
+		self.split = str(cfg.split)
+		self.split_memory_limit = cfg.split_memory_limit
+		self.cluster_steps = str(cfg.cluster_steps)
+		self.cluster_reassign = str(int(cfg.cluster_reassign))
+		self.remove_tmp_files = str(int(cfg.remove_tmp_files))
+
+	def cluster(self):
+		self.create_db()
+		self.run_foldseek_cluster()
+
+	def run_foldseek_cluster(self):
+		raw_db = str(self.db_path / "raw_db")
+		cluster_db = str(self.db_path / "cluster_db")
+		tmp_dir = str(self.db_path / "tmp")
+
+		cmd = [
+			"foldseek", "cluster",
+			raw_db, cluster_db, tmp_dir,
+			"--alignment-type", "0",                    # 3Di only (structure, no sequence)
+			"--min-seq-id", "0.0",                      # no sequence identity filter
+			"--tmscore-threshold", self.tmscore_threshold,
+			"--tmscore-threshold-mode", self.tmscore_threshold_mode,
+			"--lddt-threshold", self.lddt_threshold,
+			"-c", self.coverage,
+			"--cov-mode", self.cov_mode,
+			"--cluster-mode", self.cluster_mode,
+			"-e", self.e_value,
+			"-s", self.sensitivity,
+			"--max-seqs", self.max_seqs,
+			"--min-aln-len", self.min_aln_len,
+			"--max-seq-len", self.max_seq_len,
+			"--split", self.split,
+			"--split-memory-limit", self.split_memory_limit,
+			"--cluster-steps", self.cluster_steps,
+			"--cluster-reassign", self.cluster_reassign,
+			"--remove-tmp-files", self.remove_tmp_files,
+			"-v", self.verbosity,
+		]
+
+		subprocess.run(cmd)
+
+	def create_db(self):
+		self.db_path.mkdir(parents=True, exist_ok=True)
+		cmd = [
+			"foldseek", "createdb",
+			str(self.input_path),
+			str(self.db_path / "raw_db"),
+			"--db-extraction-mode", "0",              # chain extraction
+			"--input-format", "2",                    # mmCIF
+			"--distance-threshold", self.distance_threshold,
+			"--mask-bfactor-threshold", self.mask_bfactor_threshold,
+			"--coord-store-mode", self.coord_store_mode,
+			"--chain-name-mode", self.chain_name_mode,
+			"-v", self.verbosity,
+		]
+
+		subprocess.run(cmd)
+
+	def parse_clusters(self) -> Dict[str, str]:
+		"""returns {chain_id: cluster_representative}"""
+		tsv_path = self.db_path / "clusters.tsv"
+		raw_db = str(self.db_path / "raw_db")
+		cluster_db = str(self.db_path / "cluster_db")
+
+		subprocess.run([
+			"foldseek", "createtsv",
+			raw_db, raw_db, cluster_db, str(tsv_path),
+			"-v", self.verbosity,
+		])
+
+		clusters = {}
+		for line in tsv_path.read_text().splitlines():
+			rep, member = line.split("\t")
+			clusters[member] = rep
+		return clusters
+
 class DataPipeline:
 	def __init__(self, cfg: DataPipelineCfg):
 		self.experimental_dl = ExperimentalDataDownload(cfg.experimental_dl)
+		self.s3_path = S3Path(cfg.s3_path)
+		self.local_path = Path(cfg.local_path)
+		self.foldseek = FoldSeek(cfg.foldseek)
+		self.foldseek_input_path = Path(cfg.foldseek.input_path)
+		self.foldseek_db_path = Path(cfg.foldseek.db_path)
 
 	def download(self):
 		self.experimental_dl.download()
+
+	def cluster(self):
+		self.foldseek.cluster()
+
 
 class ExperimentalDataDownload:
 	def __init__(self, cfg: ExperimentalDataDownloadCfg):
@@ -45,7 +158,7 @@ class ExperimentalDataDownload:
 		self.max_entries = cfg.max_entries
 		self.semaphore_limit = cfg.semaphore_limit
 		self.chunk_size = cfg.chunk_size
-		self.s3_path = cfg.s3_path
+		self.s3_path = S3Path(cfg.s3_path)
 		self.local_path = Path(cfg.local_path)
 
 	def download(self):
@@ -54,16 +167,15 @@ class ExperimentalDataDownload:
 
 	async def _download_async(self, experimental_ids: List[str]):
 		semaphore = asyncio.Semaphore(self.semaphore_limit)
-		s3 = S3Path(self.s3_path)
 		self.local_path.mkdir(parents=True, exist_ok=True)
 		pbar = tqdm(total=len(experimental_ids), desc="downloading")
 
 		async def _task(pdb_id, s3_client):
-			result = await self._maybe_pdbredo_else_rcsb(pdb_id, session, semaphore, s3_client, s3.bucket, s3.key)
+			result = await self._maybe_pdbredo_else_rcsb(pdb_id, session, semaphore, s3_client)
 			pbar.update(1)
 			return result
 
-		s3_session = aioboto3.Session()
+		s3_session = get_session(aio=True)
 		succeeded, failed = 0, 0
 		async with aiohttp.ClientSession() as session, \
 			s3_session.client("s3", region_name=REGION) as s3_client:
@@ -85,7 +197,7 @@ class ExperimentalDataDownload:
 
 	async def _maybe_pdbredo_else_rcsb(
 		self, pdb_id: str, session: aiohttp.ClientSession,
-		semaphore: asyncio.Semaphore, s3_client, bucket: str, prefix: str,
+		semaphore: asyncio.Semaphore, s3_client,
 	):
 		# semaphore only covers HTTP downloads to rate-limit external requests
 		async with semaphore:
@@ -96,7 +208,7 @@ class ExperimentalDataDownload:
 			return None
 
 		pid = pdb_id.lower()
-		key_base = f"{prefix}/{pid}" if prefix else pid
+		pdb_s3_path = self.s3_path / pid
 
 		# upload per-chain npz, write ca cif locally for foldseek
 		for chain_id, chain_data in data["chains"].items():
@@ -108,10 +220,10 @@ class ExperimentalDataDownload:
 				bfactor=chain_data["bfactor"],
 				sequence=np.array(chain_data["sequence"]),
 			)
-			await upload_bytes_to_s3(buf.getvalue(), bucket, f"{key_base}/{pid}_{chain_id}.npz", s3_client)
+			await upload_bytes_to_s3(buf.getvalue(), pdb_s3_path / f"{pid}_{chain_id}.npz", s3_client)
 
-			cif_path = self.local_path / f"{pid}_{chain_id}_ca.cif.gz"
-			cif_path.write_bytes(gzip.compress(chain_data["ca_cif"].encode()))
+			cif_path = self.local_path / f"{pid}_{chain_id}.cif.gz"
+			cif_path.write_bytes(gzip.compress(chain_data["cif"].encode()))
 
 		# upload pdb-level metadata as gzipped json
 		meta = {
@@ -128,7 +240,7 @@ class ExperimentalDataDownload:
 			],
 		}
 		meta_gz = gzip.compress(json.dumps(meta).encode())
-		await upload_bytes_to_s3(meta_gz, bucket, f"{key_base}/{pid}_meta.json.gz", s3_client)
+		await upload_bytes_to_s3(meta_gz, pdb_s3_path / f"{pid}_meta.json.gz", s3_client)
 
 		return pdb_id
 
@@ -170,6 +282,8 @@ class ExperimentalDataDownload:
 		with gzip.open(io.BytesIO(resp.content), "rt") as f:
 			holdings = json.load(f)
 		pdbids = list(holdings.keys())
+
+		# TODO: add rcsb search api step to pre filter based on resolution and method
 
 		if self.max_entries > 0:
 			pdbids = pdbids[:self.max_entries]
@@ -216,20 +330,30 @@ def _parse_mmcif(content: str, methods: List[str], max_resolution: float) -> Dic
 		mask = np.zeros((L, 14), dtype=bool)
 		bfactors = np.zeros(L, dtype=np.float32)
 		seq = []
-		ca_cif_lines = [
+		# backbone atoms for foldseek (needs at least N, CA, C to compute 3Di)
+		backbone_names = ["N", "CA", "C", "O", "CB"]
+		cif_lines = [
 			f"data_{chain.name}",
 			"loop_",
 			"_atom_site.group_PDB",
 			"_atom_site.id",
+			"_atom_site.type_symbol",
 			"_atom_site.label_atom_id",
+			"_atom_site.label_alt_id",
 			"_atom_site.label_comp_id",
 			"_atom_site.label_asym_id",
+			"_atom_site.label_entity_id",
 			"_atom_site.label_seq_id",
 			"_atom_site.Cartn_x",
 			"_atom_site.Cartn_y",
 			"_atom_site.Cartn_z",
+			"_atom_site.occupancy",
+			"_atom_site.B_iso_or_equiv",
+			"_atom_site.auth_seq_id",
+			"_atom_site.auth_asym_id",
+			"_atom_site.pdbx_PDB_model_num",
 		]
-		ca_atom_id = 0
+		cif_atom_id = 0
 
 		for i, res in enumerate(resolved):
 			resname = res.name
@@ -244,10 +368,15 @@ def _parse_mmcif(content: str, methods: List[str], max_resolution: float) -> Dic
 					mask[i, j] = True
 					if atom_name == "CA":
 						bfactors[i] = atom.b_iso
-						ca_atom_id += 1
-						ca_cif_lines.append(
-							f"ATOM {ca_atom_id} CA {resname} {chain.name} {i + 1} "
-							f"{atom.pos.x:.3f} {atom.pos.y:.3f} {atom.pos.z:.3f}"
+
+					if atom_name in backbone_names:
+						cif_atom_id += 1
+						elem = atom_name[0]
+						cif_lines.append(
+							f"ATOM {cif_atom_id} {elem} {atom_name} . {resname} "
+							f"{chain.name} 1 {i + 1} "
+							f"{atom.pos.x:.3f} {atom.pos.y:.3f} {atom.pos.z:.3f} "
+							f"1.00 {atom.b_iso:.2f} {i + 1} {chain.name} 1"
 						)
 
 		chains_data[chain.name] = {
@@ -255,7 +384,7 @@ def _parse_mmcif(content: str, methods: List[str], max_resolution: float) -> Dic
 			"coords": coords,
 			"atom_mask": mask,
 			"bfactor": bfactors,
-			"ca_cif": "\n".join(ca_cif_lines) + "\n",
+			"cif": "\n".join(cif_lines) + "\n",
 		}
 
 	# assembly / biounit info with Nx4x4 homogeneous transforms
@@ -317,9 +446,11 @@ def _best_residue(residues):
 
 
 @hydra.main(version_base=None, config_name="default")
-def main(cfg: DataPipeline):
-	downloader = DataPipeline(cfg)
-	downloader.download()
+def main(cfg: DataPipelineCfg):
+	pipeline = DataPipeline(cfg)
+	pipeline.download()
+	pipeline.cluster()
+
 
 if __name__ == "__main__":
 	main()
