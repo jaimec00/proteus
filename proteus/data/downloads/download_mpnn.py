@@ -62,14 +62,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data_dir",
         type=Path,
-        default=Path("./data"),
+        default=Path("/home/ubuntu/proteus/data"),
         help="directory to download data to",
     )
     parser.add_argument(
         "--s3_path",
         type=S3Path,
-        default=None,
-        help="optional S3 URI to upload extracted data (e.g. s3://pmpnn-data-bucket/pdb_2021aug02)",
+        default=S3Path("s3://pmpnn-data-bucket"),
+        help="optional S3 URI to upload extracted data (e.g. s3://pmpnn-data-bucket/)",
     )
     parser.add_argument(
         "--debug",

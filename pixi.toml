@@ -41,9 +41,11 @@ mlflow = ">=3.0"
 jaxtyping = "*"
 psutil = "*"
 ninja = "*"
+aioboto3 = "*"
 boto3 = "*"
 awscrt = "*"
 cloudpathlib = "*"
+gemmi = "*"
 
 [pypi-dependencies]
 proteus = { path = ".", editable = true }
