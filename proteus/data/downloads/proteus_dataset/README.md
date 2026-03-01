@@ -14,16 +14,17 @@
 each pdb is stored as a unit. all its chains live together, zstd-compressed.
 
 per chain:
-- atom14: L,14,3 — 3d coords
+- coords: L,14,3 — atom14 3d coords
 - sequence: string of one letter AA identifiers
 - atom_mask: L,14 boolean mask of valid atom coords
+- ca_cif: CA-only mmCIF string (for foldseek, deleted after clustering)
 - per resi plddt: L, (for predicted structures)
 - per resi bfactor: L, (for experimental structures)
 
 per pdb:
 - chains: list of chain IDs
 - biounits: list of lists (inner = chains in biounit, outer = each biounit)
-- asmb_xforms: list of Nx3x3 transforms, one per biounit
+- asmb_xforms: list of Nx4x4 homogeneous transforms, one per biounit
 
 ## index
 
@@ -38,25 +39,30 @@ small enough to fit in memory on every process. contains per chain:
 for each source, in parallel:
 1. stream download the compressed archive
 2. for each pdb in the stream, extract everything at once:
-    - CA coords -> local foldseek-ready directory
-    - full chain data (atom14, sequence, atom_mask, etc.) -> zstd-compress
-      -> upload to `s3://bucket/staging/{pdb_id}.zst`
-    - metadata record -> append to local catalog (sqlite or parquet)
+    - per chain: `{pdb}_{chain}.npz` (coords, atom_mask, bfactor, sequence)
+      -> upload to `s3://bucket/staging/{pdb}/{pdb}_{chain}.npz`
+    - per chain: CA-only mmCIF -> gzip -> upload to
+      `s3://bucket/staging/{pdb}/{pdb}_{chain}_ca.cif.gz`
+    - per pdb: metadata (resolution, method, date, source, assemblies)
+      -> gzip json -> upload to `s3://bucket/staging/{pdb}/{pdb}_meta.json.gz`
 3. source archive is never stored locally, just streamed
+4. chains are kept as separate files during staging so CA CIFs can be
+   deleted after foldseek without unpacking blobs
 
-peak local disk: CA coords (~100-200GB) + catalog (negligible).
-s3 staging grows to ~8TB of individual pdb objects.
+peak local disk: negligible (no local staging, everything streamed to s3).
+s3 staging grows to ~8TB of individual per-chain objects.
 each source is streamed exactly once.
 
 ### foldseek (global, sequential)
 
-1. build foldseek db from CA coords
+1. download CA CIFs from s3 staging, build foldseek db
 2. dedup with foldseek easy-linclust at high identity threshold (fast, linear time).
    assign dups the cluster of their representative. delete dup CA coords, keep dedup mapping.
 3. cluster representatives with foldseek easy-cluster at structural similarity threshold.
    propagate cluster ids to all chains via dedup mapping.
-4. delete CA coords entirely. only the catalog + cluster assignments remain.
-5. delete staging objects for deduped pdbs from s3
+4. delete CA CIFs from s3 staging. only npz + meta files remain.
+5. build catalog (sqlite or parquet) with per-chain cluster assignments.
+6. delete staging objects for deduped pdbs from s3
 
 ### shard planning (in memory, fast)
 

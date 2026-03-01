@@ -26,6 +26,10 @@ ln -s -f $HOME/.tmux/.tmux.conf $HOME/.tmux.conf
 cp $HOME/.tmux/.tmux.conf.local $HOME/.tmux.conf.local
 echo "set -g mouse on" >> $HOME/.tmux.conf.local
 
+# add codium (what i use) extensions
+codium --install-extension ms-python.python
+codium --install-extension tamasfe.even-better-toml
+
 # logins at the end
 echo "logging in to aws..."
 aws login
