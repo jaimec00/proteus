@@ -33,6 +33,9 @@ aws login
 echo "logging in to claude..."
 claude auth login
 
+echo "logging in to github"
+gh auth login
+
 # add git config stuff, will remove later
 git config --global user.name "jaimec00"
 git config --global user.email "hejaca00@gmail.com"
