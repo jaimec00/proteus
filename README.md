@@ -12,12 +12,3 @@ We use pixi for this repo, so just run
 `pixi shell`
 
 to drop into an interactive environment
-
-Download training data (ProteinMPNN dataset):
-
-```shell
-DATA_PATH=/PATH/TO/YOUR/DATA && \
-wget https://files.ipd.uw.edu/pub/training_sets/pdb_2021aug02.tar.gz -P $DATA_PATH && \
-tar -xzf $DATA_PATH/pdb_2021aug02.tar.gz -C $DATA_PATH && \
-rm $DATA_PATH/pdb_2021aug02.tar.gz
-```

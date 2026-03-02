@@ -41,7 +41,8 @@
       "Bash(aws s3:*)",
       "Bash(gh search:*)",
       "Bash(gh api:*)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:rsync.pdb-redo.eu)"
     ]
   }
 }
