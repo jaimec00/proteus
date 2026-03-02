@@ -166,8 +166,6 @@ class DataPipeline:
 	def __init__(self, cfg: DataPipelineCfg):
 		self.experimental_dl = ExperimentalDataDownload(cfg.experimental_dl)
 		self.foldseek = FoldSeek(cfg.foldseek)
-		self.foldseek_input_path = Path(cfg.foldseek.input_path)
-		self.foldseek_db_path = Path(cfg.foldseek.db_path)
 		self.s3_path = S3Path(cfg.s3_path)
 		self.local_path = Path(cfg.local_path)
 
@@ -695,6 +693,10 @@ def _parse_mmcif(content: str, methods: List[str], max_resolution: float, min_ch
 				mat4[:3, :3] = np.array(oper.transform.mat.tolist(), dtype=np.float32)
 				mat4[:3, 3] = np.array(oper.transform.vec.tolist(), dtype=np.float32)
 				transforms.append(mat4)
+		# only keep chains that passed filtering
+		biounit_chains = [c for c in biounit_chains if c in chains_data]
+		if not biounit_chains:
+			continue
 		assemblies.append({
 			"chains": biounit_chains,
 			"transforms": np.stack(transforms) if transforms else np.empty((0, 4, 4), dtype=np.float32),
