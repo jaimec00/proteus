@@ -331,9 +331,12 @@ class ShardWriter:
 
 class ExperimentalDataDownload:
 	def __init__(self, cfg: ExperimentalDataDownloadCfg):
+		assert cfg.min_chain_length >= 4, \
+			f"min_chain_length must be >= 4 for foldseek clustering, got {cfg.min_chain_length}"
 		self.methods = set(cfg.methods)
 		self.max_resolution = cfg.max_resolution
 		self.max_entries = cfg.max_entries
+		self.min_chain_length = cfg.min_chain_length
 		self.semaphore_limit = cfg.semaphore_limit
 		self.chunk_size = cfg.chunk_size
 		self.shard_size_bytes = cfg.shard_size_mb * 1024 * 1024
@@ -489,7 +492,7 @@ class ExperimentalDataDownload:
 		if raw is None:
 			return None
 		content = raw.decode("utf-8")
-		data = _parse_mmcif(content, self.methods, self.max_resolution)
+		data = _parse_mmcif(content, self.methods, self.max_resolution, self.min_chain_length)
 		if data is None:
 			return None
 		data |= {"source": "pdb-redo"}
@@ -505,7 +508,7 @@ class ExperimentalDataDownload:
 			return None
 		with gzip.open(io.BytesIO(raw), "rt") as f:
 			content = f.read()
-		data = _parse_mmcif(content, self.methods, self.max_resolution)
+		data = _parse_mmcif(content, self.methods, self.max_resolution, self.min_chain_length)
 		if data is None:
 			return None
 		data |= {"source": "rcsb"}
@@ -583,7 +586,7 @@ class ExperimentalDataDownload:
 			holdings = json.load(f)
 		return list(holdings.keys())
 
-def _parse_mmcif(content: str, methods: List[str], max_resolution: float) -> Dict | None:
+def _parse_mmcif(content: str, methods: List[str], max_resolution: float, min_chain_length: int = 4) -> Dict | None:
 	structure = gemmi.read_structure_string(content)
 
 	# filter by experimental method
@@ -615,7 +618,7 @@ def _parse_mmcif(content: str, methods: List[str], max_resolution: float) -> Dic
 			elif res_or_group.name in resname_2_one:
 				resolved.append(res_or_group)
 
-		if not resolved:
+		if len(resolved) < min_chain_length:
 			continue
 
 		L = len(resolved)
