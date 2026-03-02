@@ -72,11 +72,29 @@ class FoldSeek:
 		self.cluster_steps = str(cfg.cluster_steps)
 		self.cluster_reassign = str(int(cfg.cluster_reassign))
 
-	def cluster(self):
-		self.create_db()
-		return self.run_foldseek_cluster()
+	def create_db(self):
+		self.db_path.mkdir(parents=True, exist_ok=True)
+		cmd = [
+			"foldseek", "createdb",
+			str(self.input_path),
+			str(self.raw_db_path),
+			"--db-extraction-mode", "0",              # chain extraction
+			"--input-format", "2",                    # mmCIF
+			"--distance-threshold", self.distance_threshold,
+			"--mask-bfactor-threshold", self.mask_bfactor_threshold,
+			"--coord-store-mode", self.coord_store_mode,
+			"--chain-name-mode", self.chain_name_mode,
+			"-v", self.verbosity,
+		]
 
-	def run_foldseek_cluster(self):
+		db_output = subprocess.run(cmd)
+
+		# delete the raw cifs after we create the db
+		db_output.check_returncode()
+		shutil.rmtree(self.input_path)
+
+	def run_cluster(self):
+		"""run foldseek cluster, clean up tmp dir. does not parse results."""
 		raw_db = str(self.raw_db_path)
 		cluster_db = str(self.cluster_db_path)
 		tmp_dir = str(self.tmp_dir)
@@ -105,35 +123,14 @@ class FoldSeek:
 			"-v", self.verbosity,
 		]
 
-		clusters_output = subprocess.run(cmd)
-		clusters_output.check_returncode()
+		result = subprocess.run(cmd)
+		result.check_returncode()
 		if self.tmp_dir.exists():
 			shutil.rmtree(self.tmp_dir)
-		return self.parse_clusters()
-
-	def create_db(self):
-		self.db_path.mkdir(parents=True, exist_ok=True)
-		cmd = [
-			"foldseek", "createdb",
-			str(self.input_path),
-			str(self.raw_db_path),
-			"--db-extraction-mode", "0",              # chain extraction
-			"--input-format", "2",                    # mmCIF
-			"--distance-threshold", self.distance_threshold,
-			"--mask-bfactor-threshold", self.mask_bfactor_threshold,
-			"--coord-store-mode", self.coord_store_mode,
-			"--chain-name-mode", self.chain_name_mode,
-			"-v", self.verbosity,
-		]
-
-		db_output = subprocess.run(cmd)
-
-		# delete the raw cifs after we create the db
-		db_output.check_returncode() # make sure it worked before we delete everything
-		shutil.rmtree(self.input_path)
 
 	def parse_clusters(self) -> Dict[str, str]:
-		"""returns {chain_id: cluster_representative}"""
+		"""run createtsv, clean up db files, return {chain_id: cluster_representative}.
+		leaves the TSV on disk so it can serve as a resume signal."""
 
 		raw_db, cluster_db, tsv_path = str(self.raw_db_path), str(self.cluster_db_path), str(self.cluster_tsv_path)
 
@@ -144,19 +141,26 @@ class FoldSeek:
 		])
 		result.check_returncode()
 
-		# clean up db files and tmp dir now that we have the tsv
+		# clean up db files now that we have the tsv
 		for f in self.db_path.glob(self.raw_db_path.name + "*"):
 			f.unlink()
 		for f in self.db_path.glob(self.cluster_db_path.name + "*"):
 			f.unlink()
 
+		return self.load_clusters()
+
+	def load_clusters(self) -> Dict[str, str]:
+		"""read existing clusters.tsv into {chain_id: cluster_representative}"""
 		clusters = {}
 		for line in self.cluster_tsv_path.read_text().splitlines():
 			rep, member = line.split("\t")
 			clusters[member] = rep
-		self.cluster_tsv_path.unlink()
-
 		return clusters
+
+	def cleanup_tsv(self):
+		"""remove the clusters TSV after index has been safely uploaded"""
+		if self.cluster_tsv_path.exists():
+			self.cluster_tsv_path.unlink()
 
 class DataPipeline:
 	def __init__(self, cfg: DataPipelineCfg):
@@ -169,9 +173,6 @@ class DataPipeline:
 
 	def download(self):
 		return self.experimental_dl.download()
-
-	def cluster(self):
-		return self.foldseek.cluster()
 
 	def run(self):
 		index_rows = self.download()
@@ -186,7 +187,20 @@ class DataPipeline:
 		pq.write_table(table, index_path)
 		logger.info(f"saved index with {len(index_rows)} rows to {index_path}")
 
-		clusters = self.cluster()
+		# clustering: resume from whichever stage completed last
+		if self.foldseek.cluster_tsv_path.exists():
+			logger.info("found existing clusters.tsv, skipping foldseek")
+			clusters = self.foldseek.load_clusters()
+		else:
+			has_cluster_db = any(self.foldseek.db_path.glob(self.foldseek.cluster_db_path.name + "*"))
+			if has_cluster_db:
+				logger.info("found existing cluster db, skipping createdb and cluster")
+			else:
+				has_raw_db = any(self.foldseek.db_path.glob(self.foldseek.raw_db_path.name + "*"))
+				if not has_raw_db:
+					self.foldseek.create_db()
+				self.foldseek.run_cluster()
+			clusters = self.foldseek.parse_clusters()
 
 		# add cluster_id column
 		cluster_ids = [
@@ -201,10 +215,10 @@ class DataPipeline:
 		upload_bytes_to_s3_sync(index_path.read_bytes(), s3_index_path)
 		logger.info(f"uploaded index to {s3_index_path}")
 
-		# clean up checkpoint now that the pipeline completed successfully
-		checkpoint_path = self.local_path / "checkpoint.jsonl"
-		if checkpoint_path.exists():
-			checkpoint_path.unlink()
+		# cleanup only after S3 upload succeeds
+		self.foldseek.cleanup_tsv()
+		if self.experimental_dl.checkpoint_path.exists():
+			self.experimental_dl.checkpoint_path.unlink()
 			logger.info("removed checkpoint file after successful completion")
 
 
@@ -325,6 +339,7 @@ class ExperimentalDataDownload:
 		self.shard_size_bytes = cfg.shard_size_mb * 1024 * 1024
 		self.s3_path = S3Path(cfg.s3_path)
 		self.local_path = Path(cfg.local_path)
+		self.checkpoint_path = Path(cfg.checkpoint_path)
 
 	def download(self):
 		experimental_ids = self._get_experimental_ids()
@@ -332,7 +347,7 @@ class ExperimentalDataDownload:
 
 	def _load_checkpoint(self) -> tuple[list[dict], set[str], int]:
 		"""read checkpoint from previous run. returns (index_rows, done_pdb_ids, next_shard_id)"""
-		checkpoint_path = self.local_path / "checkpoint.jsonl"
+		checkpoint_path = self.checkpoint_path
 		if not checkpoint_path.exists():
 			return [], set(), 0
 		index_rows = []
@@ -359,7 +374,7 @@ class ExperimentalDataDownload:
 		pbar = tqdm(total=len(remaining), desc="downloading")
 
 		connector = aiohttp.TCPConnector(limit=self.semaphore_limit, enable_cleanup_closed=True)
-		timeout = aiohttp.ClientTimeout(total=60, connect=10)
+		timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_read=60)
 		s3_session = get_session(aio=True)
 		succeeded, failed = 0, 0
 		async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session, \
@@ -370,7 +385,7 @@ class ExperimentalDataDownload:
 				shard_size_bytes=self.shard_size_bytes,
 				source="experimental",
 				s3_client=s3_client,
-				checkpoint_path=self.local_path / "checkpoint.jsonl",
+				checkpoint_path=self.checkpoint_path,
 				resume_index_rows=index_rows,
 				resume_shard_id=next_shard_id,
 			)

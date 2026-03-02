@@ -70,22 +70,32 @@ index rows are appended to a local `checkpoint.jsonl` file. the checkpoint
 write happens only after the s3 upload succeeds, so if a row is in the
 checkpoint, its shard is guaranteed to be in s3.
 
-on restart, the checkpoint is read to recover: which pdbs are already done,
-the pre-built index rows, and the next shard id. only remaining pdbs are
-downloaded. a crash mid-upload loses at most the current shard (re-downloaded
-on resume). the checkpoint file is a few MB even at hundreds of thousands of
-rows.
+the checkpoint lives at the pipeline level (`tmp/checkpoint.jsonl`), not
+inside the foldseek input dir. on restart, the checkpoint is read to recover:
+which pdbs are already done, the pre-built index rows, and the next shard id.
+only remaining pdbs are downloaded. a crash mid-upload loses at most the
+current shard (re-downloaded on resume).
 
-after the full pipeline completes successfully (index written, clustering
-done, final index uploaded), the checkpoint is deleted. absence of a
-checkpoint on the next run means start from scratch.
+after the full pipeline completes successfully (index uploaded to s3), the
+checkpoint and cluster TSV are deleted. absence of both on the next run
+means start from scratch.
 
 ### foldseek clustering (global, sequential)
 
-1. build foldseek db from local CA CIFs
-2. cluster with foldseek at structural similarity threshold
-3. parse cluster assignments → update index with cluster_id column
-4. delete local CA CIFs
+the foldseek stage is broken into granular steps, each leaving artifacts
+on disk so the pipeline can resume from whichever step completed last:
+
+1. `create_db` — build foldseek db from local CA CIFs, then delete CIFs
+2. `run_cluster` — run foldseek cluster, clean up tmp dir
+3. `parse_clusters` — run createtsv, delete db files, leave `clusters.tsv`
+4. index is updated with cluster_id column and uploaded to s3
+5. `cleanup_tsv` — delete clusters.tsv only after s3 upload succeeds
+
+on resume, the pipeline checks state in priority order:
+- `clusters.tsv` exists → skip all foldseek, just read the TSV
+- cluster db files exist → skip createdb and cluster, run createtsv
+- raw db files exist → skip createdb, run cluster + createtsv
+- nothing exists → full pipeline from createdb
 
 clustering is used only for train/val/test splitting, not for shard layout
 or training-time sampling.
@@ -186,7 +196,7 @@ from cache, avoiding repeated s3 reads.
 
 ## why this works
 
-- crash-resumable — checkpoint after each shard upload, lose at most one shard
+- crash-resumable — checkpoint after each shard upload, foldseek resumes from last completed step
 - no staging, no re-sharding — each pdb written to s3 exactly once
 - source-homogeneous shards allow independent updates per source
 - streaming shard reads — low memory footprint, process blobs as they arrive

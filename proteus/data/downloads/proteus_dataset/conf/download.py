@@ -15,6 +15,7 @@ class ExperimentalDataDownloadCfg:
 	shard_size_mb: int = 256
 	s3_path: str = "${..s3_path}"
 	local_path: str = "${foldseek.input_path}"
+	checkpoint_path: str = "${..local_path}/checkpoint.jsonl"
 
 @dataclass
 class FoldSeekCfg:
