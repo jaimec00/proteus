@@ -309,13 +309,14 @@ class ExperimentalDataDownload:
 		return asyncio.run(self._download_async(experimental_ids))
 
 	async def _download_async(self, experimental_ids: List[str]):
-		semaphore = asyncio.Semaphore(self.semaphore_limit)
 		self.local_path.mkdir(parents=True, exist_ok=True)
 		pbar = tqdm(total=len(experimental_ids), desc="downloading")
 
+		connector = aiohttp.TCPConnector(limit=self.semaphore_limit, enable_cleanup_closed=True)
+		timeout = aiohttp.ClientTimeout(total=60, connect=10)
 		s3_session = get_session(aio=True)
 		succeeded, failed = 0, 0
-		async with aiohttp.ClientSession() as session, \
+		async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session, \
 			s3_session.client("s3", region_name=REGION) as s3_client:
 
 			shard_writer = ShardWriter(
@@ -328,7 +329,7 @@ class ExperimentalDataDownload:
 
 			async def _task(pdb_id):
 				result = await self._maybe_pdbredo_else_rcsb(
-					pdb_id, session, semaphore, shard_writer, shard_lock,
+					pdb_id, session, shard_writer, shard_lock,
 				)
 				pbar.update(1)
 				return result
@@ -354,14 +355,11 @@ class ExperimentalDataDownload:
 
 	async def _maybe_pdbredo_else_rcsb(
 		self, pdb_id: str, session: aiohttp.ClientSession,
-		semaphore: asyncio.Semaphore,
 		shard_writer: "ShardWriter", shard_lock: asyncio.Lock,
 	):
-		# semaphore only covers HTTP downloads to rate-limit external requests
-		async with semaphore:
-			data = await self._download_pdbredo(pdb_id, session)
-			if data is None:
-				data = await self._download_rcsb(pdb_id, session)
+		data = await self._download_pdbredo(pdb_id, session)
+		if data is None:
+			data = await self._download_rcsb(pdb_id, session)
 		if data is None:
 			return None
 
@@ -386,13 +384,47 @@ class ExperimentalDataDownload:
 
 		return pdb_id
 
+	async def _fetch(
+		self, session: aiohttp.ClientSession, url: str,
+		max_retries: int = 3, retry_statuses: frozenset[int] | None = None,
+	) -> bytes | None:
+		"""fetch url with retries and exponential backoff. returns None on non-retryable errors.
+
+		retry_statuses: HTTP status codes to retry (default: 500+). pass empty set to
+		never retry on status codes (still retries network/timeout errors).
+		"""
+		if retry_statuses is None:
+			retry_statuses = frozenset(range(500, 600))
+		for attempt in range(max_retries):
+			try:
+				async with session.get(url) as resp:
+					if resp.status in retry_statuses:
+						raise aiohttp.ClientResponseError(
+							resp.request_info, resp.history,
+							status=resp.status, message=f"server error {resp.status}",
+						)
+					if resp.status != 200:
+						return None
+					return await resp.read()
+			except (aiohttp.ClientError, asyncio.TimeoutError):
+				if attempt == max_retries - 1:
+					raise
+				delay = 2 ** attempt
+				logger.warning(f"retry {attempt + 1}/{max_retries} for {url} (waiting {delay}s)")
+				await asyncio.sleep(delay)
+
 	async def _download_pdbredo(self, pdb_id: str, session: aiohttp.ClientSession):
+		# pdb-redo returns 500 (not 404) for missing entries, so treat any
+		# non-200 as "not found" without retrying. still retry on network errors.
 		pid = pdb_id.lower()
-		url = f"https://pdb-redo.eu/db/{pid}/{pid}_final.cif"
-		async with session.get(url) as resp:
-			if resp.status != 200:
-				return None
-			content = (await resp.read()).decode("utf-8")
+		raw = await self._fetch(
+			session,
+			f"https://pdb-redo.eu/db/{pid}/{pid}_final.cif",
+			retry_statuses=frozenset(),
+		)
+		if raw is None:
+			return None
+		content = raw.decode("utf-8")
 		data = _parse_mmcif(content, self.methods, self.max_resolution)
 		if data is None:
 			return None
@@ -401,14 +433,14 @@ class ExperimentalDataDownload:
 
 	async def _download_rcsb(self, pdb_id: str, session: aiohttp.ClientSession):
 		pid = pdb_id.lower()
-		url = f"https://files.wwpdb.org/pub/pdb/data/structures/divided/mmCIF/{pid[1:3]}/{pid}.cif.gz"
-		async with session.get(url) as resp:
-			if resp.status != 200:
-				return None
-			raw = await resp.read()
+		raw = await self._fetch(
+			session,
+			f"https://files.wwpdb.org/pub/pdb/data/structures/divided/mmCIF/{pid[1:3]}/{pid}.cif.gz",
+		)
+		if raw is None:
+			return None
 		with gzip.open(io.BytesIO(raw), "rt") as f:
 			content = f.read()
-
 		data = _parse_mmcif(content, self.methods, self.max_resolution)
 		if data is None:
 			return None

@@ -37,7 +37,8 @@
       "WebFetch(domain:www.embopress.org)",
       "WebFetch(domain:link.springer.com)",
       "WebFetch(domain:pdb-redo.eu)",
-      "Bash(rsync:*)"
+      "Bash(rsync:*)",
+      "Bash(aws s3:*)"
     ]
   }
 }
