@@ -6,6 +6,7 @@ import gzip
 import io
 import json
 import logging
+import tarfile
 import aiohttp
 import aioboto3
 import asyncio
@@ -14,8 +15,9 @@ import hydra
 from pathlib import Path
 from cloudpathlib import S3Path
 from tqdm import tqdm
-import omegaconf
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import zstandard as zstd
 import gemmi
 import shutil
@@ -72,8 +74,7 @@ class FoldSeek:
 
 	def cluster(self):
 		self.create_db()
-		clusters = self.run_foldseek_cluster()
-		print(clusters)
+		return self.run_foldseek_cluster()
 
 	def run_foldseek_cluster(self):
 		raw_db = str(self.raw_db_path)
@@ -167,14 +168,129 @@ class DataPipeline:
 		self.local_path = Path(cfg.local_path)
 
 	def download(self):
-		self.experimental_dl.download()
+		return self.experimental_dl.download()
 
 	def cluster(self):
-		self.foldseek.cluster()
+		return self.foldseek.cluster()
 
 	def run(self):
-		self.download()
-		self.cluster()
+		index_rows = self.download()
+		index_path = self.local_path / "index.parquet"
+
+		# build columnar dict from list of row dicts
+		columns = {}
+		for key in index_rows[0]:
+			columns[key] = [row[key] for row in index_rows]
+
+		table = pa.table(columns)
+		pq.write_table(table, index_path)
+		logger.info(f"saved index with {len(index_rows)} rows to {index_path}")
+
+		clusters = self.cluster()
+
+		# add cluster_id column
+		cluster_ids = [
+			clusters.get(f"{pdb}_{chain}", "")
+			for pdb, chain in zip(columns["pdb"], columns["chain"])
+		]
+		table = table.append_column("cluster_id", pa.array(cluster_ids))
+		pq.write_table(table, index_path)
+
+		# upload index to s3
+		s3_index_path = self.s3_path / "shards" / "index.parquet"
+		upload_bytes_to_s3_sync(index_path.read_bytes(), s3_index_path)
+		logger.info(f"uploaded index to {s3_index_path}")
+
+
+def upload_bytes_to_s3_sync(data: bytes, s3_path: S3Path):
+	"""synchronous upload of bytes to S3"""
+	session = get_session(aio=False)
+	client = session.client("s3", region_name=REGION)
+	client.put_object(Bucket=s3_path.bucket, Key=s3_path.key, Body=data)
+
+
+class ShardWriter:
+	"""packs PDB blobs into tar shards on-the-fly and uploads them to S3"""
+
+	def __init__(self, s3_prefix: S3Path, shard_size_bytes: int, source: str, s3_client):
+		self._s3_prefix = s3_prefix
+		self._shard_size_bytes = shard_size_bytes
+		self._source = source
+		self._s3_client = s3_client
+
+		self._shard_id = 0
+		self._buf = io.BytesIO()
+		self._tar = tarfile.open(fileobj=self._buf, mode="w")
+		self._entry_count = 0
+		self._pending_uploads: list[asyncio.Task] = []
+		self._index_rows: list[dict] = []
+
+	def add(self, pid: str, blob: bytes, chain_ids: list[str], meta: dict):
+		"""append a blob to the current shard, recording index rows per chain"""
+		# record byte offset before writing
+		header_offset = self._buf.tell()
+		data_offset = header_offset + 512  # tar header is 512 bytes
+
+		# add blob to tar
+		info = tarfile.TarInfo(name=f"{pid}.npz.zst")
+		info.size = len(blob)
+		self._tar.addfile(info, io.BytesIO(blob))
+		self._entry_count += 1
+
+		# verify tar layout: data should start right after a 512-byte header
+		expected_end = data_offset + len(blob) + (-len(blob) % 512)
+		assert self._buf.tell() == expected_end, \
+			f"unexpected tar layout for {pid}: expected {expected_end}, got {self._buf.tell()}"
+
+		# record one index row per chain
+		shard_name = f"{self._source}/{self._shard_id:06d}"
+		for chain_id in chain_ids:
+			self._index_rows.append({
+				"pdb": pid,
+				"chain": chain_id,
+				"source": meta["source"],
+				"shard_id": shard_name,
+				"offset": data_offset,
+				"size": len(blob),
+				"resolution": meta["resolution"],
+				"method": meta["method"],
+				"deposit_date": meta["deposit_date"],
+			})
+
+		# flush if over size target
+		if self._buf.tell() >= self._shard_size_bytes:
+			self._flush_shard()
+
+	def _flush_shard(self):
+		"""close current tar, start background upload, reset buffer"""
+		self._tar.close()
+		shard_bytes = self._buf.getvalue()
+
+		shard_key = f"shards/{self._source}/{self._shard_id:06d}.tar"
+		s3_path = self._s3_prefix / shard_key
+
+		task = asyncio.create_task(
+			upload_bytes_to_s3(shard_bytes, s3_path, self._s3_client)
+		)
+		self._pending_uploads.append(task)
+		logger.info(f"flushing shard {self._shard_id:06d} ({len(shard_bytes)} bytes, {self._entry_count} entries)")
+
+		# reset for next shard
+		self._shard_id += 1
+		self._buf = io.BytesIO()
+		self._tar = tarfile.open(fileobj=self._buf, mode="w")
+		self._entry_count = 0
+
+	async def finalize(self) -> list[dict]:
+		"""flush last shard if non-empty, await all uploads, return index rows"""
+		if self._entry_count > 0:
+			self._flush_shard()
+
+		if self._pending_uploads:
+			await asyncio.gather(*self._pending_uploads)
+			logger.info(f"all {self._shard_id} shards uploaded")
+
+		return self._index_rows
 
 
 class ExperimentalDataDownload:
@@ -184,30 +300,42 @@ class ExperimentalDataDownload:
 		self.max_entries = cfg.max_entries
 		self.semaphore_limit = cfg.semaphore_limit
 		self.chunk_size = cfg.chunk_size
+		self.shard_size_bytes = cfg.shard_size_mb * 1024 * 1024
 		self.s3_path = S3Path(cfg.s3_path)
 		self.local_path = Path(cfg.local_path)
 
 	def download(self):
 		experimental_ids = self._get_experimental_ids()
-		asyncio.run(self._download_async(experimental_ids))
+		return asyncio.run(self._download_async(experimental_ids))
 
 	async def _download_async(self, experimental_ids: List[str]):
 		semaphore = asyncio.Semaphore(self.semaphore_limit)
 		self.local_path.mkdir(parents=True, exist_ok=True)
 		pbar = tqdm(total=len(experimental_ids), desc="downloading")
 
-		async def _task(pdb_id, s3_client):
-			result = await self._maybe_pdbredo_else_rcsb(pdb_id, session, semaphore, s3_client)
-			pbar.update(1)
-			return result
-
 		s3_session = get_session(aio=True)
 		succeeded, failed = 0, 0
 		async with aiohttp.ClientSession() as session, \
 			s3_session.client("s3", region_name=REGION) as s3_client:
+
+			shard_writer = ShardWriter(
+				s3_prefix=self.s3_path,
+				shard_size_bytes=self.shard_size_bytes,
+				source="experimental",
+				s3_client=s3_client,
+			)
+			shard_lock = asyncio.Lock()
+
+			async def _task(pdb_id):
+				result = await self._maybe_pdbredo_else_rcsb(
+					pdb_id, session, semaphore, shard_writer, shard_lock,
+				)
+				pbar.update(1)
+				return result
+
 			for i in range(0, len(experimental_ids), self.chunk_size):
 				chunk = experimental_ids[i:i + self.chunk_size]
-				tasks = [_task(pdb_id, s3_client) for pdb_id in chunk]
+				tasks = [_task(pdb_id) for pdb_id in chunk]
 				results = await asyncio.gather(*tasks, return_exceptions=True)
 				for pdb_id, result in zip(chunk, results):
 					if isinstance(result, Exception):
@@ -217,13 +345,17 @@ class ExperimentalDataDownload:
 						failed += 1
 					else:
 						succeeded += 1
+
+			index_rows = await shard_writer.finalize()
 		pbar.close()
 
 		logger.info(f"done: {succeeded} succeeded, {failed} skipped out of {len(experimental_ids)}")
+		return index_rows
 
 	async def _maybe_pdbredo_else_rcsb(
 		self, pdb_id: str, session: aiohttp.ClientSession,
-		semaphore: asyncio.Semaphore, s3_client,
+		semaphore: asyncio.Semaphore,
+		shard_writer: "ShardWriter", shard_lock: asyncio.Lock,
 	):
 		# semaphore only covers HTTP downloads to rate-limit external requests
 		async with semaphore:
@@ -240,9 +372,17 @@ class ExperimentalDataDownload:
 			cif_path = self.local_path / f"{pid}_{chain_id}.cif.gz"
 			cif_path.write_bytes(gzip.compress(chain_data["cif"].encode()))
 
-		# pack everything into a single zstd-compressed per-pdb blob
+		# pack into blob and add to shard
 		blob = _serialize_pdb_blob(pid, data)
-		await upload_bytes_to_s3(blob, self.s3_path / f"{pid}.npz.zst", s3_client)
+		chain_ids = list(data["chains"].keys())
+		meta = {
+			"resolution": data["resolution"],
+			"method": data["method"],
+			"deposit_date": data["deposit_date"],
+			"source": data["source"],
+		}
+		async with shard_lock:
+			shard_writer.add(pid, blob, chain_ids, meta)
 
 		return pdb_id
 
@@ -321,15 +461,31 @@ class ExperimentalDataDownload:
 			json=query,
 			timeout=120,
 		)
-		resp.raise_for_status()
-		results = resp.json()
-		pdbids = [hit["identifier"].upper() for hit in results.get("result_set", [])]
-		logger.info(f"rcsb search returned {len(pdbids)} entries")
+
+		if resp.status_code == 200 and resp.content:
+			results = resp.json()
+			pdbids = [hit["identifier"].upper() for hit in results.get("result_set", [])]
+			logger.info(f"rcsb search returned {len(pdbids)} entries")
+		else:
+			# fallback: get all PDB IDs from holdings and let _parse_mmcif filter
+			logger.warning(f"rcsb search API returned {resp.status_code}, falling back to holdings")
+			pdbids = self._get_holdings_ids()
+			logger.info(f"holdings returned {len(pdbids)} entries")
 
 		if self.max_entries > 0:
 			pdbids = pdbids[:self.max_entries]
 
 		return pdbids
+
+	def _get_holdings_ids(self) -> List[str]:
+		"""get all PDB IDs from wwPDB holdings file"""
+		url = "https://files.wwpdb.org/pub/pdb/holdings/current_file_holdings.json.gz"
+		logger.info(f"retrieving rcsb metadata at {url} ...")
+		resp = requests.get(url, timeout=120)
+		resp.raise_for_status()
+		with gzip.open(io.BytesIO(resp.content), "rt") as f:
+			holdings = json.load(f)
+		return list(holdings.keys())
 
 def _parse_mmcif(content: str, methods: List[str], max_resolution: float) -> Dict | None:
 	structure = gemmi.read_structure_string(content)
@@ -557,8 +713,7 @@ def _best_residue(residues):
 @hydra.main(version_base=None, config_name="default")
 def main(cfg: DataPipelineCfg):
 	pipeline = DataPipeline(cfg)
-	pipeline.download()
-	pipeline.cluster()
+	pipeline.run()
 
 
 if __name__ == "__main__":

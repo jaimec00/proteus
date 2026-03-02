@@ -2,6 +2,7 @@
 import asyncio
 from pathlib import Path
 
+import boto3
 import aioboto3
 from aiobotocore.config import AioConfig
 from boto3.s3.transfer import TransferConfig

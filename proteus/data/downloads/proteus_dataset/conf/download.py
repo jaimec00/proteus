@@ -12,6 +12,7 @@ class ExperimentalDataDownloadCfg:
 	# pipeline
 	semaphore_limit: int = 32
 	chunk_size: int = 1000
+	shard_size_mb: int = 256
 	s3_path: str = "${..s3_path}"
 	local_path: str = "${foldseek.input_path}"
 

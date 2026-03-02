@@ -35,7 +35,9 @@
       "WebFetch(domain:search.rcsb.org)",
       "WebFetch(domain:pmc.ncbi.nlm.nih.gov)",
       "WebFetch(domain:www.embopress.org)",
-      "WebFetch(domain:link.springer.com)"
+      "WebFetch(domain:link.springer.com)",
+      "WebFetch(domain:pdb-redo.eu)",
+      "Bash(rsync:*)"
     ]
   }
 }
