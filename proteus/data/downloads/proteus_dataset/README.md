@@ -63,6 +63,23 @@ touching other sources' data.
 peak local disk: CA CIFs for foldseek (~200GB). everything else streams
 directly to s3.
 
+#### crash-resume via checkpoint
+
+the download pipeline is resumable. after each shard is uploaded to s3, its
+index rows are appended to a local `checkpoint.jsonl` file. the checkpoint
+write happens only after the s3 upload succeeds, so if a row is in the
+checkpoint, its shard is guaranteed to be in s3.
+
+on restart, the checkpoint is read to recover: which pdbs are already done,
+the pre-built index rows, and the next shard id. only remaining pdbs are
+downloaded. a crash mid-upload loses at most the current shard (re-downloaded
+on resume). the checkpoint file is a few MB even at hundreds of thousands of
+rows.
+
+after the full pipeline completes successfully (index written, clustering
+done, final index uploaded), the checkpoint is deleted. absence of a
+checkpoint on the next run means start from scratch.
+
 ### foldseek clustering (global, sequential)
 
 1. build foldseek db from local CA CIFs
@@ -169,6 +186,7 @@ from cache, avoiding repeated s3 reads.
 
 ## why this works
 
+- crash-resumable — checkpoint after each shard upload, lose at most one shard
 - no staging, no re-sharding — each pdb written to s3 exactly once
 - source-homogeneous shards allow independent updates per source
 - streaming shard reads — low memory footprint, process blobs as they arrive

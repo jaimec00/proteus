@@ -201,6 +201,12 @@ class DataPipeline:
 		upload_bytes_to_s3_sync(index_path.read_bytes(), s3_index_path)
 		logger.info(f"uploaded index to {s3_index_path}")
 
+		# clean up checkpoint now that the pipeline completed successfully
+		checkpoint_path = self.local_path / "checkpoint.jsonl"
+		if checkpoint_path.exists():
+			checkpoint_path.unlink()
+			logger.info("removed checkpoint file after successful completion")
+
 
 def upload_bytes_to_s3_sync(data: bytes, s3_path: S3Path):
 	"""synchronous upload of bytes to S3"""
@@ -212,18 +218,23 @@ def upload_bytes_to_s3_sync(data: bytes, s3_path: S3Path):
 class ShardWriter:
 	"""packs PDB blobs into tar shards on-the-fly and uploads them to S3"""
 
-	def __init__(self, s3_prefix: S3Path, shard_size_bytes: int, source: str, s3_client):
+	def __init__(
+		self, s3_prefix: S3Path, shard_size_bytes: int, source: str, s3_client,
+		checkpoint_path: Path = None, resume_index_rows: list[dict] = None, resume_shard_id: int = 0,
+	):
 		self._s3_prefix = s3_prefix
 		self._shard_size_bytes = shard_size_bytes
 		self._source = source
 		self._s3_client = s3_client
+		self._checkpoint_path = checkpoint_path
 
-		self._shard_id = 0
+		self._shard_id = resume_shard_id
 		self._buf = io.BytesIO()
 		self._tar = tarfile.open(fileobj=self._buf, mode="w")
 		self._entry_count = 0
 		self._pending_uploads: list[asyncio.Task] = []
-		self._index_rows: list[dict] = []
+		self._index_rows: list[dict] = resume_index_rows or []
+		self._shard_row_start = len(self._index_rows)
 
 	def add(self, pid: str, blob: bytes, chain_ids: list[str], meta: dict):
 		"""append a blob to the current shard, recording index rows per chain"""
@@ -262,24 +273,35 @@ class ShardWriter:
 			self._flush_shard()
 
 	def _flush_shard(self):
-		"""close current tar, start background upload, reset buffer"""
+		"""close current tar, start background upload + checkpoint, reset buffer"""
 		self._tar.close()
 		shard_bytes = self._buf.getvalue()
 
 		shard_key = f"shards/{self._source}/{self._shard_id:06d}.tar"
 		s3_path = self._s3_prefix / shard_key
 
+		# snapshot the rows belonging to this shard before resetting
+		shard_rows = self._index_rows[self._shard_row_start:]
 		task = asyncio.create_task(
-			upload_bytes_to_s3(shard_bytes, s3_path, self._s3_client)
+			self._upload_and_checkpoint(shard_bytes, s3_path, shard_rows)
 		)
 		self._pending_uploads.append(task)
 		logger.info(f"flushing shard {self._shard_id:06d} ({len(shard_bytes)} bytes, {self._entry_count} entries)")
 
 		# reset for next shard
 		self._shard_id += 1
+		self._shard_row_start = len(self._index_rows)
 		self._buf = io.BytesIO()
 		self._tar = tarfile.open(fileobj=self._buf, mode="w")
 		self._entry_count = 0
+
+	async def _upload_and_checkpoint(self, shard_bytes: bytes, s3_path, rows: list[dict]):
+		"""upload shard to S3, then append its index rows to the checkpoint file"""
+		await upload_bytes_to_s3(shard_bytes, s3_path, self._s3_client)
+		if self._checkpoint_path:
+			with open(self._checkpoint_path, "a") as f:
+				for row in rows:
+					f.write(json.dumps(row) + "\n")
 
 	async def finalize(self) -> list[dict]:
 		"""flush last shard if non-empty, await all uploads, return index rows"""
@@ -308,9 +330,33 @@ class ExperimentalDataDownload:
 		experimental_ids = self._get_experimental_ids()
 		return asyncio.run(self._download_async(experimental_ids))
 
+	def _load_checkpoint(self) -> tuple[list[dict], set[str], int]:
+		"""read checkpoint from previous run. returns (index_rows, done_pdb_ids, next_shard_id)"""
+		checkpoint_path = self.local_path / "checkpoint.jsonl"
+		if not checkpoint_path.exists():
+			return [], set(), 0
+		index_rows = []
+		done_pids = set()
+		max_shard = -1
+		for line in checkpoint_path.read_text().splitlines():
+			row = json.loads(line)
+			index_rows.append(row)
+			done_pids.add(row["pdb"])
+			shard_num = int(row["shard_id"].rsplit("/", 1)[1])
+			max_shard = max(max_shard, shard_num)
+		next_shard_id = max_shard + 1 if max_shard >= 0 else 0
+		logger.info(f"resume: {len(done_pids)} PDBs already done across {next_shard_id} shards")
+		return index_rows, done_pids, next_shard_id
+
 	async def _download_async(self, experimental_ids: List[str]):
 		self.local_path.mkdir(parents=True, exist_ok=True)
-		pbar = tqdm(total=len(experimental_ids), desc="downloading")
+
+		# load checkpoint from previous run (if any)
+		index_rows, done_pids, next_shard_id = self._load_checkpoint()
+		remaining = [pid for pid in experimental_ids if pid.lower() not in done_pids]
+		logger.info(f"{len(remaining)} to download ({len(done_pids)} already done)")
+
+		pbar = tqdm(total=len(remaining), desc="downloading")
 
 		connector = aiohttp.TCPConnector(limit=self.semaphore_limit, enable_cleanup_closed=True)
 		timeout = aiohttp.ClientTimeout(total=60, connect=10)
@@ -324,6 +370,9 @@ class ExperimentalDataDownload:
 				shard_size_bytes=self.shard_size_bytes,
 				source="experimental",
 				s3_client=s3_client,
+				checkpoint_path=self.local_path / "checkpoint.jsonl",
+				resume_index_rows=index_rows,
+				resume_shard_id=next_shard_id,
 			)
 			shard_lock = asyncio.Lock()
 
@@ -334,8 +383,8 @@ class ExperimentalDataDownload:
 				pbar.update(1)
 				return result
 
-			for i in range(0, len(experimental_ids), self.chunk_size):
-				chunk = experimental_ids[i:i + self.chunk_size]
+			for i in range(0, len(remaining), self.chunk_size):
+				chunk = remaining[i:i + self.chunk_size]
 				tasks = [_task(pdb_id) for pdb_id in chunk]
 				results = await asyncio.gather(*tasks, return_exceptions=True)
 				for pdb_id, result in zip(chunk, results):
@@ -350,7 +399,7 @@ class ExperimentalDataDownload:
 			index_rows = await shard_writer.finalize()
 		pbar.close()
 
-		logger.info(f"done: {succeeded} succeeded, {failed} skipped out of {len(experimental_ids)}")
+		logger.info(f"done: {succeeded} succeeded, {failed} skipped out of {len(remaining)}")
 		return index_rows
 
 	async def _maybe_pdbredo_else_rcsb(
