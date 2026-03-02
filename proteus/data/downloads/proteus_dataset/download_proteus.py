@@ -6,6 +6,7 @@ import gzip
 import io
 import json
 import logging
+import re
 import tarfile
 import aiohttp
 import aioboto3
@@ -22,6 +23,7 @@ import zstandard as zstd
 import gemmi
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from proteus.types import Dict, List
 from proteus.static.constants import resname_2_one, noncanonical_parent, atoms as atom14_order
@@ -343,8 +345,25 @@ class ExperimentalDataDownload:
 		self.checkpoint_path = Path(cfg.checkpoint_path)
 
 	def download(self):
+		pdbredo_ids = self._get_pdbredo_ids()
 		experimental_ids = self._get_experimental_ids()
-		return asyncio.run(self._download_async(experimental_ids))
+
+		# split into rcsb-only and pdb-redo lists to avoid wasted 500 probes
+		exp_set = set(pid.lower() for pid in experimental_ids)
+		pdbredo_set = pdbredo_ids & exp_set
+		rcsb_only = [pid for pid in experimental_ids if pid.lower() not in pdbredo_set]
+		pdbredo_list = [pid for pid in experimental_ids if pid.lower() in pdbredo_set]
+
+		# apply max_entries limit split evenly across both sources
+		if self.max_entries > 0:
+			half = self.max_entries // 2
+			rcsb_only = rcsb_only[:half]
+			pdbredo_list = pdbredo_list[:self.max_entries - len(rcsb_only)]
+
+		combined = rcsb_only + pdbredo_list
+		boundary = len(rcsb_only)
+		logger.info(f"{len(rcsb_only)} rcsb-only, {len(pdbredo_list)} pdb-redo entries")
+		return asyncio.run(self._download_async(combined, boundary))
 
 	def _load_checkpoint(self) -> tuple[list[dict], set[str], int]:
 		"""read checkpoint from previous run. returns (index_rows, done_pdb_ids, next_shard_id)"""
@@ -364,12 +383,16 @@ class ExperimentalDataDownload:
 		logger.info(f"resume: {len(done_pids)} PDBs already done across {next_shard_id} shards")
 		return index_rows, done_pids, next_shard_id
 
-	async def _download_async(self, experimental_ids: List[str]):
+	async def _download_async(self, combined: List[str], boundary: int = 0):
 		self.local_path.mkdir(parents=True, exist_ok=True)
 
 		# load checkpoint from previous run (if any)
 		index_rows, done_pids, next_shard_id = self._load_checkpoint()
-		remaining = [pid for pid in experimental_ids if pid.lower() not in done_pids]
+		rcsb_only = combined[:boundary]
+		remaining = [pid for pid in combined if pid.lower() not in done_pids]
+
+		# recompute boundary after removing already-done entries
+		boundary = sum(1 for pid in rcsb_only if pid.lower() not in done_pids)
 		logger.info(f"{len(remaining)} to download ({len(done_pids)} already done)")
 
 		pbar = tqdm(total=len(remaining), desc="downloading")
@@ -392,20 +415,20 @@ class ExperimentalDataDownload:
 			)
 			shard_lock = asyncio.Lock()
 
-			async def _task(pdb_id):
-				result = await self._maybe_pdbredo_else_rcsb(
-					pdb_id, session, shard_writer, shard_lock,
+			async def _task(pdb_id, is_pdb_redo):
+				result = await self._download_entry(
+					pdb_id, session, shard_writer, shard_lock, is_pdb_redo,
 				)
 				pbar.update(1)
 				return result
 
 			for i in range(0, len(remaining), self.chunk_size):
-				chunk = remaining[i:i + self.chunk_size]
-				tasks = [_task(pdb_id) for pdb_id in chunk]
+				chunk_indices = range(i, min(i + self.chunk_size, len(remaining)))
+				tasks = [_task(remaining[j], is_pdb_redo=(j >= boundary)) for j in chunk_indices]
 				results = await asyncio.gather(*tasks, return_exceptions=True)
-				for pdb_id, result in zip(chunk, results):
+				for j, result in zip(chunk_indices, results):
 					if isinstance(result, Exception):
-						logger.error(f"{pdb_id}: {result}")
+						logger.error(f"{remaining[j]}: {result}")
 						failed += 1
 					elif result is None:
 						failed += 1
@@ -418,11 +441,14 @@ class ExperimentalDataDownload:
 		logger.info(f"done: {succeeded} succeeded, {failed} skipped out of {len(remaining)}")
 		return index_rows
 
-	async def _maybe_pdbredo_else_rcsb(
+	async def _download_entry(
 		self, pdb_id: str, session: aiohttp.ClientSession,
 		shard_writer: "ShardWriter", shard_lock: asyncio.Lock,
+		is_pdb_redo: bool = False,
 	):
-		data = await self._download_pdbredo(pdb_id, session)
+		data = None
+		if is_pdb_redo:
+			data = await self._download_pdbredo(pdb_id, session)
 		if data is None:
 			data = await self._download_rcsb(pdb_id, session)
 		if data is None:
@@ -512,6 +538,62 @@ class ExperimentalDataDownload:
 		data |= {"source": "rcsb"}
 		return data
 
+	def _get_pdbredo_ids(self) -> set[str]:
+		"""fetch the set of PDB IDs available on PDB-REDO via parallel rsync listing.
+		lists 2-char prefix dirs, then queries each prefix in parallel to get 4-char PDB IDs.
+		returns lowercase 4-char IDs. on failure returns empty set (graceful degradation)."""
+
+		pdb_id_re = re.compile(r'[0-9][a-z0-9]{3}')
+		rsync_base = "rsync://rsync.pdb-redo.eu/pdb-redo"
+
+		def _list_prefix(prefix: str) -> list[str]:
+			r = subprocess.run(
+				["rsync", "--list-only", "--no-motd", f"{rsync_base}/{prefix}/"],
+				capture_output=True, text=True, timeout=30,
+			)
+			r.check_returncode()
+			ids = []
+			for line in r.stdout.splitlines():
+				if not line.startswith("d"):
+					continue
+				name = line.split()[-1]
+				if pdb_id_re.fullmatch(name):
+					ids.append(name)
+			return ids
+
+		try:
+			logger.info("fetching pdb-redo entry list via rsync ...")
+			# get 2-char prefix directories
+			result = subprocess.run(
+				["rsync", "--list-only", "--no-motd", f"{rsync_base}/"],
+				capture_output=True, text=True, timeout=120,
+			)
+			result.check_returncode()
+			prefixes = []
+			for line in result.stdout.splitlines():
+				if not line.startswith("d"):
+					continue
+				name = line.split()[-1]
+				if re.fullmatch(r'[0-9a-z]{2}', name):
+					prefixes.append(name)
+			logger.info(f"pdb-redo: {len(prefixes)} prefix dirs, listing entries ...")
+
+			# query each prefix in parallel
+			ids: set[str] = set()
+			with ThreadPoolExecutor(max_workers=40) as pool:
+				futures = {pool.submit(_list_prefix, p): p for p in prefixes}
+				for fut in as_completed(futures):
+					try:
+						ids.update(fut.result())
+					except Exception as e:
+						logger.warning(f"pdb-redo prefix {futures[fut]}: {e}")
+
+			logger.info(f"pdb-redo listing: {len(ids)} entries")
+			return ids
+		except Exception as e:
+			logger.warning(f"failed to fetch pdb-redo listing: {e}. all entries will use rcsb.")
+			return set()
+
 	def _get_experimental_ids(self) -> List[str]:
 		# query RCSB Search API for PDB IDs matching our method and resolution criteria
 		method_nodes = [
@@ -568,9 +650,6 @@ class ExperimentalDataDownload:
 			logger.warning(f"rcsb search API returned {resp.status_code}, falling back to holdings")
 			pdbids = self._get_holdings_ids()
 			logger.info(f"holdings returned {len(pdbids)} entries")
-
-		if self.max_entries > 0:
-			pdbids = pdbids[:self.max_entries]
 
 		return pdbids
 
