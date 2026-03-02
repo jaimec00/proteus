@@ -518,7 +518,7 @@ class ExperimentalDataDownload:
 				"type": "terminal",
 				"service": "text",
 				"parameters": {
-					"attribute": "rcsb_entry_info.experimental_method",
+					"attribute": "exptl.method",
 					"operator": "exact_match",
 					"value": method,
 				},
