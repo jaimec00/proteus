@@ -16,6 +16,7 @@ from cloudpathlib import S3Path
 from tqdm import tqdm
 import omegaconf
 import numpy as np
+import zstandard as zstd
 import gemmi
 import shutil
 import subprocess
@@ -233,39 +234,15 @@ class ExperimentalDataDownload:
 			return None
 
 		pid = pdb_id.lower()
-		pdb_s3_path = self.s3_path / pid
 
-		# upload per-chain npz, write ca cif locally for foldseek
+		# write ca cifs locally for foldseek
 		for chain_id, chain_data in data["chains"].items():
-			buf = io.BytesIO()
-			np.savez_compressed(
-				buf,
-				coords=chain_data["coords"],
-				atom_mask=chain_data["atom_mask"],
-				bfactor=chain_data["bfactor"],
-				sequence=np.array(chain_data["sequence"]),
-			)
-			await upload_bytes_to_s3(buf.getvalue(), pdb_s3_path / f"{pid}_{chain_id}.npz", s3_client)
-
 			cif_path = self.local_path / f"{pid}_{chain_id}.cif.gz"
 			cif_path.write_bytes(gzip.compress(chain_data["cif"].encode()))
 
-		# upload pdb-level metadata as gzipped json
-		meta = {
-			"resolution": data["resolution"],
-			"method": data["method"],
-			"deposit_date": data["deposit_date"],
-			"source": data["source"],
-			"assemblies": [
-				{
-					"chains": a["chains"],
-					"transforms": a["transforms"].tolist(),
-				}
-				for a in data["assemblies"]
-			],
-		}
-		meta_gz = gzip.compress(json.dumps(meta).encode())
-		await upload_bytes_to_s3(meta_gz, pdb_s3_path / f"{pid}_meta.json.gz", s3_client)
+		# pack everything into a single zstd-compressed per-pdb blob
+		blob = _serialize_pdb_blob(pid, data)
+		await upload_bytes_to_s3(blob, self.s3_path / f"{pid}.npz.zst", s3_client)
 
 		return pdb_id
 
@@ -480,6 +457,74 @@ def _parse_mmcif(content: str, methods: List[str], max_resolution: float) -> Dic
 		"resolution": structure.resolution,
 		"method": method,
 		"deposit_date": deposit_date,
+	}
+
+
+ZSTD_LEVEL = 10
+
+def _serialize_pdb_blob(pid: str, data: Dict) -> bytes:
+	"""pack all per-chain arrays + pdb metadata into a single zstd-compressed npz blob.
+
+	layout inside the npz:
+	  - {chain_id}/coords, {chain_id}/atom_mask, {chain_id}/bfactor, {chain_id}/sequence
+	  - _meta (json bytes)
+	  - _chains (list of chain IDs, for ordering)
+	"""
+	arrays = {}
+	chain_ids = list(data["chains"].keys())
+	for chain_id, chain_data in data["chains"].items():
+		arrays[f"{chain_id}/coords"] = chain_data["coords"]
+		arrays[f"{chain_id}/atom_mask"] = chain_data["atom_mask"]
+		arrays[f"{chain_id}/bfactor"] = chain_data["bfactor"]
+		arrays[f"{chain_id}/sequence"] = np.array(chain_data["sequence"])
+
+	meta = {
+		"resolution": data["resolution"],
+		"method": data["method"],
+		"deposit_date": data["deposit_date"],
+		"source": data["source"],
+		"chains": chain_ids,
+		"assemblies": [
+			{"chains": a["chains"], "transforms": a["transforms"].tolist()}
+			for a in data["assemblies"]
+		],
+	}
+	arrays["_meta"] = np.void(json.dumps(meta).encode())
+
+	buf = io.BytesIO()
+	np.savez(buf, **arrays)
+	compressor = zstd.ZstdCompressor(level=ZSTD_LEVEL)
+	return compressor.compress(buf.getvalue())
+
+
+def _deserialize_pdb_blob(blob: bytes) -> Dict:
+	"""inverse of _serialize_pdb_blob. returns the same dict structure."""
+	decompressor = zstd.ZstdDecompressor()
+	raw = decompressor.decompress(blob)
+	npz = np.load(io.BytesIO(raw), allow_pickle=False)
+
+	meta = json.loads(bytes(npz["_meta"]))
+	chains = {}
+	for chain_id in meta["chains"]:
+		chains[chain_id] = {
+			"coords": npz[f"{chain_id}/coords"],
+			"atom_mask": npz[f"{chain_id}/atom_mask"],
+			"bfactor": npz[f"{chain_id}/bfactor"],
+			"sequence": str(npz[f"{chain_id}/sequence"]),
+		}
+
+	assemblies = [
+		{"chains": a["chains"], "transforms": np.array(a["transforms"], dtype=np.float32)}
+		for a in meta["assemblies"]
+	]
+
+	return {
+		"chains": chains,
+		"assemblies": assemblies,
+		"resolution": meta["resolution"],
+		"method": meta["method"],
+		"deposit_date": meta["deposit_date"],
+		"source": meta["source"],
 	}
 
 

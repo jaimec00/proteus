@@ -32,7 +32,10 @@
       "WebFetch(domain:project-gemmi.github.io)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:www.wwpdb.org)",
-      "WebFetch(domain:search.rcsb.org)"
+      "WebFetch(domain:search.rcsb.org)",
+      "WebFetch(domain:pmc.ncbi.nlm.nih.gov)",
+      "WebFetch(domain:www.embopress.org)",
+      "WebFetch(domain:link.springer.com)"
     ]
   }
 }
