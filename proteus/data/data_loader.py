@@ -24,27 +24,12 @@ class DataHolderCfg:
     min_seq_size: int = 16
     max_seq_size: int = 16384
     max_resolution: float = 3.5
-    homo_thresh: float = 0.70
+    min_plddt: float = 0.70
     asymmetric_units_only: bool = False
     num_workers: int = 8
     prefetch_factor: int = 2
     rng_seed: int = 42
     buffer_size: int = 32
-
-@dataclass
-class DataCfg:
-    data_path: Path
-    clusters_df: pd.DataFrame
-    num_clusters: int = -1
-    batch_tokens: int = 16384
-    min_seq_size: int = 16
-    max_seq_size: int = 16384
-    homo_thresh: float = 0.70
-    asymmetric_units_only: bool = False
-    buffer_size: int = 32
-    seed: int = 42
-    epoch: Any = None
-
 
 class DataHolder:
 
@@ -62,67 +47,77 @@ class DataHolder:
         # load the index
         index = pq.read_table(index_path)
 
-        pdb_path = data_path / "pdb"
-        train_info, val_info, test_info = self._get_splits(data_path, config.max_resolution)
+        # filter
+        index = self._apply_filters(cfg.max_resolution, cfg.min_plddt)
 
-        def init_loader(df: pd.DataFrame, samples: int=-1) -> DataLoader:
-            '''helper to init a different loader for train val and test'''
+        # dummy split, need to add splits in index
+        train_index, val_index, test_index = self._get_splits(index, cfg.num_train, cfg.num_val, cfg.num_test)
 
-            data = Data(DataCfg(
-                data_path=pdb_path,
-                clusters_df=df,
-                num_clusters=samples,
-                batch_tokens=config.batch_tokens,
-                min_seq_size=config.min_seq_size,
-                max_seq_size=config.max_seq_size,
-                homo_thresh=config.homo_thresh,
-                asymmetric_units_only=config.asymmetric_units_only,
-                buffer_size=config.buffer_size,
-                seed=config.rng_seed,
-            ))
+        # initialize Data objects
+        init_data = partial(
+            Data, 
+            s3_bucket=cfg.s3_bucket, 
+            batch_tokens=config.batch_tokens,
+            min_seq_size=config.min_seq_size,
+            max_seq_size=config.max_seq_size,
+            asymmetric_units_only=config.asymmetric_units_only,
+            buffer_size=config.buffer_size,
+            seed=config.rng_seed,
+        )
+        train_data = init_data(index=train_index),
+        val_data = init_data(index=val_index)
+        test_data = init_data(index=test_index)
 
-            loader = DataLoader(
-                data, 
-                batch_size=None, 
-                num_workers=config.num_workers, 
-                collate_fn=lambda x: x,
-                prefetch_factor=config.prefetch_factor if config.num_workers else None, 
-                persistent_workers=config.num_workers>0
-            )
-
-            return loader
+        # initialize dataloaders
+        init_loader = partial(
+            DataLoader, 
+            batch_size=None, 
+            num_workers=config.num_workers, 
+            collate_fn=lambda x: x,
+            prefetch_factor=config.prefetch_factor if config.num_workers else None, 
+            persistent_workers=config.num_workers>0
+        )
 
         # initialize the loaders
-        self.train = init_loader(train_info, config.num_train)
-        self.val = init_loader(val_info, config.num_val)
-        self.test = init_loader(test_info, config.num_test)
+        self.train = init_loader(train_data)
+        self.val = init_loader(val_data)
+        self.test = init_loader(test_data)
 
-    def _get_splits(self, data_path: Path, max_resolution: float) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    def _apply_filters(
+        self, 
+        index: pa.Table, 
+        max_resolution: int = 3.5, 
+        min_plddt: float = 0.70
+    ) -> pa.Table:
+        raise NotImplementedError
 
-        # get the csv info, filter out anything above max res
-        clusters = pd.read_csv(data_path / Path("list.csv"), header=0, usecols=["CHAINID", "RESOLUTION", "CLUSTER"], engine="python")
-        clusters = clusters.loc[clusters.RESOLUTION <= max_resolution, :]
-        clusters.pop("RESOLUTION") # only need this to filter by res
+    def _get_splits(
+        self, 
+        index: pa.Table, 
+        num_train: int, 
+        num_val: int, 
+        num_test: int
+    ) -> Tuple[pa.Table, pa.Table, pa.Table]:
+        raise NotImplementedError
 
-        # get the val and test clusters
-        with open(data_path / Path("valid_clusters.txt"), "r") as v:
-            val_clusters = [int(i) for i in v.read().split("\n") if i]
-        with open(data_path / Path("test_clusters.txt"), "r") as t:
-            test_clusters = [int(i) for i in t.read().split("\n") if i]
-
-        # split the csv accordingly
-        train_info = clusters.loc[~clusters.CLUSTER.isin(val_clusters+test_clusters), :]
-        val_info = clusters.loc[clusters.CLUSTER.isin(val_clusters), :]
-        test_info = clusters.loc[clusters.CLUSTER.isin(test_clusters), :]
-
-        return train_info, val_info, test_info
 
 class Data(IterableDataset):
-    def __init__(self, config: DataCfg) -> None:
+    def __init__(
+        self, 
+        s3_bucket: S3Path, 
+        index: pa.Table,
+        batch_tokens: int = 16384,
+        min_seq_size: int = 16,
+        max_seq_size: int = 512,
+        asymmetric_units_only: bool = False,
+        buffer_size: int = 32,
+        seed: int = 0,
+    ) -> None:
 
         super().__init__()
 
-        assert config.max_seq_size <= config.batch_tokens, f"max_seq_size ({config.max_seq_size}) must be <= batch_tokens ({config.batch_tokens})"
+        assert max_seq_size <= batch_tokens, f"max_seq_size ({max_seq_size}) must be <= batch_tokens ({batch_tokens})"
+        raise NotImplementedError # not ready yet, get back to this once dataset creation is more consistent
 
         # keep a cache of pdbs
         self._pdb_cache = PDBCache(PDBCacheCfg(

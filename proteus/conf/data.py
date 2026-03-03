@@ -1,10 +1,11 @@
 from proteus.data.data_loader import DataHolderCfg
 from hydra.core.config_store import ConfigStore
 from dataclasses import dataclass
+from cloudpathlib import S3Path
 
 @dataclass
 class DefaultData(DataHolderCfg):
-    data_path: str = "/home/ubuntu/proteinDiffVirgina/data/pdb_2021aug02"
+    s3_bucket: S3Path = field(default_factory=S3Path("s3://proteus-data-bucket"))
     num_train: int = -1
     num_val: int = -1
     num_test: int = -1
@@ -12,7 +13,7 @@ class DefaultData(DataHolderCfg):
     min_seq_size: int = 16
     max_seq_size: int = 512
     max_resolution: float = 3.5
-    homo_thresh: float = 0.7
+    min_plddt: float = 0.70
     asymmetric_units_only: bool = False
     num_workers: int = 16
     prefetch_factor: int = 8
