@@ -1,0 +1,126 @@
+name: Claude PR Review
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  claude-review:
+    if: |
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch PR details
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            PR_NUMBER=${{ github.event.issue.number }}
+          else
+            PR_NUMBER=${{ github.event.pull_request.number }}
+          fi
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+          PR_DATA=$(gh pr view "$PR_NUMBER" --json headRefName,baseRefName,title,body)
+          echo "head=$(echo "$PR_DATA" | jq -r .headRefName)" >> "$GITHUB_OUTPUT"
+          echo "base=$(echo "$PR_DATA" | jq -r .baseRefName)" >> "$GITHUB_OUTPUT"
+          echo "title=$(echo "$PR_DATA" | jq -r .title)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR branch
+        run: |
+          git fetch origin ${{ steps.pr.outputs.head }}
+          git checkout ${{ steps.pr.outputs.head }}
+
+      - name: Get PR diff
+        id: diff
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr diff ${{ steps.pr.outputs.number }} > /tmp/pr_diff.txt
+
+      - name: Run Claude review
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          COMMENT_BODY=$(cat <<'COMMENT_EOF'
+          ${{ github.event.comment.body }}
+          COMMENT_EOF
+          )
+
+          PR_DIFF=$(cat /tmp/pr_diff.txt)
+
+          # Build the prompt
+          PROMPT=$(cat <<'PROMPT_EOF'
+          You are a senior code reviewer. A user tagged you in a PR comment asking for a review.
+
+          ## PR Title
+          PROMPT_EOF
+          )
+          PROMPT="$PROMPT
+          ${{ steps.pr.outputs.title }}
+
+          ## User Comment
+          $COMMENT_BODY
+
+          ## PR Diff
+          \`\`\`diff
+          $PR_DIFF
+          \`\`\`
+
+          Please provide a thorough code review. Focus on:
+          1. Correctness and potential bugs
+          2. Performance concerns
+          3. Code style and readability
+          4. Security issues
+          5. Suggestions for improvement
+
+          If the user asked a specific question in their comment, answer that directly as well.
+
+          Format your response as a clear, well-structured markdown review suitable for a GitHub PR comment."
+
+          # Call Claude API
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "content-type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "$(jq -n \
+              --arg prompt "$PROMPT" \
+              '{
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 4096,
+                "messages": [{"role": "user", "content": $prompt}]
+              }')")
+
+          # Extract the text response
+          REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // "Error: Could not generate review. Please check that the ANTHROPIC_API_KEY secret is configured."')
+
+          # Write to file to avoid shell escaping issues
+          echo "$REVIEW" > /tmp/review_body.txt
+
+      - name: Post review comment on PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REVIEW_BODY=$(cat /tmp/review_body.txt)
+          COMMENT="🤖 **Claude Review**
+
+          $REVIEW_BODY
+
+          ---
+          *Triggered by @${{ github.event.comment.user.login }}'s [comment](${{ github.event.comment.html_url }})*"
+
+          gh pr comment ${{ steps.pr.outputs.number }} --body "$COMMENT"
