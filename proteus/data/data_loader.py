@@ -7,14 +7,16 @@ import torch
 
 from typing import Generator, Tuple, Optional, Any
 from dataclasses import dataclass, field
-from pathlib import Path
+from cloudpathlib import S3Path
+import pyarrow.parquet as pq
 import pandas as pd
 
+from proteus.data.constants import DataPath, DataIndexCols
 from proteus.data.data_utils import Assembly, PDBCache, BatchBuilder, DataBatch, Sampler, PDBCacheCfg, SamplerCfg, BatchBuilderCfg
 
 @dataclass
 class DataHolderCfg:
-    data_path: Path
+    s3_bucket: S3Path
     num_train: int = -1
     num_val: int = -1
     num_test: int = -1
@@ -51,10 +53,15 @@ class DataHolder:
     multi-chain (experimental structures): https://files.ipd.uw.edu/pub/training_sets/pdb_2021aug02.tar.gz
     '''
 
-    def __init__(self, config: DataHolderCfg) -> None:
+    def __init__(self, cfg: DataHolderCfg) -> None:
 
         # define data path and path to pdbs
-        data_path = Path(config.data_path)
+        s3_bucket = cfg.s3_bucket
+        index_path = s3_bucket / DataPath.INDEX
+
+        # load the index
+        index = pq.read_table(index_path)
+
         pdb_path = data_path / "pdb"
         train_info, val_info, test_info = self._get_splits(data_path, config.max_resolution)
 
