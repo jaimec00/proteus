@@ -16,6 +16,10 @@ ln -s -f $HOME/.tmux/.tmux.conf $HOME/.tmux.conf
 cp $HOME/.tmux/.tmux.conf.local $HOME/.tmux.conf.local
 echo "set -g mouse on" >> $HOME/.tmux.conf.local
 
+# codium extensions
+codium --install-extension ms-python.python
+codium --install-extension tamasfe.even-better-toml
+
 # add git config stuff, will remove later
 git config --global user.name "jaimec00"
 git config --global user.email "hejaca00@gmail.com"
