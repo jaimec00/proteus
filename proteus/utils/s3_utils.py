@@ -60,6 +60,12 @@ async def upload_bytes_to_s3(data: bytes, s3_path: S3Path, client) -> None:
 	await client.put_object(Bucket=s3_path.bucket, Key=s3_path.key, Body=data)
 
 
+def upload_bytes_to_s3_sync(data: bytes, s3_path: S3Path) -> None:
+	"""synchronous upload of bytes to S3"""
+	client = boto3.client("s3", region_name=REGION)
+	client.put_object(Bucket=s3_path.bucket, Key=s3_path.key, Body=data)
+
+
 def upload_dir_to_s3(local_path: Path, s3_path: S3Path, max_concurrency: int = 32) -> None:
 	"""sync wrapper for async S3 directory upload"""
 	asyncio.run(_upload_dir_to_s3(local_path, s3_path, max_concurrency))

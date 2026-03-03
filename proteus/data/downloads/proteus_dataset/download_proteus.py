@@ -9,7 +9,6 @@ import logging
 import re
 import tarfile
 import aiohttp
-import boto3
 import aioboto3
 import asyncio
 import requests
@@ -28,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from proteus.types import Dict, List
 from proteus.static.constants import resname_2_one, noncanonical_parent, atoms as atom14_order
-from proteus.utils.s3_utils import upload_bytes_to_s3, REGION
+from proteus.utils.s3_utils import upload_bytes_to_s3, upload_bytes_to_s3_sync, REGION
 from proteus.data.downloads.proteus_dataset.conf.download import (
 	DataPipelineCfg,
 	ExperimentalDataDownloadCfg,
@@ -223,12 +222,6 @@ class DataPipeline:
 			logger.info("removed checkpoint file after successful completion")
 
 
-def upload_bytes_to_s3_sync(data: bytes, s3_path: S3Path):
-	"""synchronous upload of bytes to S3"""
-	client = boto3.client("s3", region_name=REGION)
-	client.put_object(Bucket=s3_path.bucket, Key=s3_path.key, Body=data)
-
-
 class ShardWriter:
 	"""packs PDB blobs into tar shards on-the-fly and uploads them to S3"""
 
@@ -250,14 +243,14 @@ class ShardWriter:
 		self._index_rows: list[dict] = resume_index_rows or []
 		self._shard_row_start = len(self._index_rows)
 
-	def add(self, pid: str, blob: bytes, chain_ids: list[str], meta: dict):
+	def add(self, pdb_id: str, blob: bytes, chain_ids: list[str], meta: dict):
 		"""append a blob to the current shard, recording index rows per chain"""
 		# record byte offset before writing
 		header_offset = self._buf.tell()
 		data_offset = header_offset + 512  # tar header is 512 bytes
 
 		# add blob to tar
-		info = tarfile.TarInfo(name=f"{pid}.npz.zst")
+		info = tarfile.TarInfo(name=f"{pdb_id}.npz.zst")
 		info.size = len(blob)
 		self._tar.addfile(info, io.BytesIO(blob))
 		self._entry_count += 1
@@ -265,13 +258,13 @@ class ShardWriter:
 		# verify tar layout: data should start right after a 512-byte header
 		expected_end = data_offset + len(blob) + (-len(blob) % 512)
 		assert self._buf.tell() == expected_end, \
-			f"unexpected tar layout for {pid}: expected {expected_end}, got {self._buf.tell()}"
+			f"unexpected tar layout for {pdb_id}: expected {expected_end}, got {self._buf.tell()}"
 
 		# record one index row per chain
 		shard_name = f"{self._source}/{self._shard_id:06d}"
 		for chain_id in chain_ids:
 			self._index_rows.append({
-				"pdb": pid,
+				"pdb": pdb_id,
 				"chain": chain_id,
 				"source": meta["source"],
 				"shard_id": shard_name,
@@ -340,6 +333,7 @@ class ExperimentalDataDownload:
 		self.semaphore_limit = cfg.semaphore_limit
 		self.chunk_size = cfg.chunk_size
 		self.shard_size_bytes = cfg.shard_size_mb * 1024 * 1024
+		self.zstd_level = cfg.zstd_level
 		self.s3_path = S3Path(cfg.s3_path)
 		self.local_path = Path(cfg.local_path)
 		self.checkpoint_path = Path(cfg.checkpoint_path)
@@ -349,10 +343,11 @@ class ExperimentalDataDownload:
 		experimental_ids = self._get_experimental_ids()
 
 		# split into rcsb-only and pdb-redo lists to avoid wasted 500 probes
-		exp_set = set(pid.lower() for pid in experimental_ids)
+		# pdbredo_ids are already lowercase, experimental_ids are normalized here
+		exp_set = set(experimental_ids)
 		pdbredo_set = pdbredo_ids & exp_set
-		rcsb_only = [pid for pid in experimental_ids if pid.lower() not in pdbredo_set]
-		pdbredo_list = [pid for pid in experimental_ids if pid.lower() in pdbredo_set]
+		rcsb_only = [pid for pid in experimental_ids if pid not in pdbredo_set]
+		pdbredo_list = [pid for pid in experimental_ids if pid in pdbredo_set]
 
 		# apply max_entries limit split evenly across both sources
 		if self.max_entries > 0:
@@ -389,10 +384,10 @@ class ExperimentalDataDownload:
 		# load checkpoint from previous run (if any)
 		index_rows, done_pids, next_shard_id = self._load_checkpoint()
 		rcsb_only = combined[:boundary]
-		remaining = [pid for pid in combined if pid.lower() not in done_pids]
+		remaining = [pid for pid in combined if pid not in done_pids]
 
 		# recompute boundary after removing already-done entries
-		boundary = sum(1 for pid in rcsb_only if pid.lower() not in done_pids)
+		boundary = sum(1 for pid in rcsb_only if pid not in done_pids)
 		logger.info(f"{len(remaining)} to download ({len(done_pids)} already done)")
 
 		pbar = tqdm(total=len(remaining), desc="downloading")
@@ -454,15 +449,13 @@ class ExperimentalDataDownload:
 		if data is None:
 			return None
 
-		pid = pdb_id.lower()
-
 		# write ca cifs locally for foldseek
 		for chain_id, chain_data in data["chains"].items():
-			cif_path = self.local_path / f"{pid}_{chain_id}.cif.gz"
+			cif_path = self.local_path / f"{pdb_id}_{chain_id}.cif.gz"
 			cif_path.write_bytes(gzip.compress(chain_data["cif"].encode()))
 
 		# pack into blob and add to shard
-		blob = _serialize_pdb_blob(pid, data)
+		blob = _serialize_pdb_blob(pdb_id, data, self.zstd_level)
 		chain_ids = list(data["chains"].keys())
 		meta = {
 			"resolution": data["resolution"],
@@ -471,7 +464,7 @@ class ExperimentalDataDownload:
 			"source": data["source"],
 		}
 		async with shard_lock:
-			shard_writer.add(pid, blob, chain_ids, meta)
+			shard_writer.add(pdb_id, blob, chain_ids, meta)
 
 		return pdb_id
 
@@ -507,10 +500,9 @@ class ExperimentalDataDownload:
 	async def _download_pdbredo(self, pdb_id: str, session: aiohttp.ClientSession):
 		# pdb-redo returns 500 (not 404) for missing entries, so treat any
 		# non-200 as "not found" without retrying. still retry on network errors.
-		pid = pdb_id.lower()
 		raw = await self._fetch(
 			session,
-			f"https://pdb-redo.eu/db/{pid}/{pid}_final.cif",
+			f"https://pdb-redo.eu/db/{pdb_id}/{pdb_id}_final.cif",
 			retry_statuses=frozenset(),
 		)
 		if raw is None:
@@ -523,10 +515,9 @@ class ExperimentalDataDownload:
 		return data
 
 	async def _download_rcsb(self, pdb_id: str, session: aiohttp.ClientSession):
-		pid = pdb_id.lower()
 		raw = await self._fetch(
 			session,
-			f"https://files.wwpdb.org/pub/pdb/data/structures/divided/mmCIF/{pid[1:3]}/{pid}.cif.gz",
+			f"https://files.wwpdb.org/pub/pdb/data/structures/divided/mmCIF/{pdb_id[1:3]}/{pdb_id}.cif.gz",
 		)
 		if raw is None:
 			return None
@@ -643,7 +634,7 @@ class ExperimentalDataDownload:
 
 		if resp.status_code == 200 and resp.content:
 			results = resp.json()
-			pdbids = [hit["identifier"].upper() for hit in results.get("result_set", [])]
+			pdbids = [hit["identifier"].lower() for hit in results.get("result_set", [])]
 			logger.info(f"rcsb search returned {len(pdbids)} entries")
 		else:
 			# fallback: get all PDB IDs from holdings and let _parse_mmcif filter
@@ -661,7 +652,7 @@ class ExperimentalDataDownload:
 		resp.raise_for_status()
 		with gzip.open(io.BytesIO(resp.content), "rt") as f:
 			holdings = json.load(f)
-		return list(holdings.keys())
+		return [pid.lower() for pid in holdings.keys()]
 
 def _parse_mmcif(content: str, methods: List[str], max_resolution: float, min_chain_length: int = 4) -> Dict | None:
 	structure = gemmi.read_structure_string(content)
@@ -796,9 +787,7 @@ def _parse_mmcif(content: str, methods: List[str], max_resolution: float, min_ch
 	}
 
 
-ZSTD_LEVEL = 10
-
-def _serialize_pdb_blob(pid: str, data: Dict) -> bytes:
+def _serialize_pdb_blob(pdb_id: str, data: Dict, zstd_level: int = 10) -> bytes:
 	"""pack all per-chain arrays + pdb metadata into a single zstd-compressed npz blob.
 
 	layout inside the npz:
@@ -829,7 +818,7 @@ def _serialize_pdb_blob(pid: str, data: Dict) -> bytes:
 
 	buf = io.BytesIO()
 	np.savez(buf, **arrays)
-	compressor = zstd.ZstdCompressor(level=ZSTD_LEVEL)
+	compressor = zstd.ZstdCompressor(level=zstd_level)
 	return compressor.compress(buf.getvalue())
 
 
