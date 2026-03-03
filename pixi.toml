@@ -6,9 +6,9 @@ channels = ["conda-forge", "nvidia", "pytorch", "bioconda"]
 platforms = ["linux-64"]
 
 [environments]
-cpu = { features = ["cpu"] , solve-group = "cpu" }
-gpu = { features = ["gpu"] , solve-group = "gpu" }
-docs = { features = ["docs"], solve-group = "cpu" }
+cpu = { features = ["shared", "cpu"] , solve-group = "cpu" }
+gpu = { features = ["shared", "gpu"] , solve-group = "gpu" }
+docs = { features = ["docs"], solve-group = "docs" }
 
 [activation.env]
 EXP_DIR = "$HOME/proteus/experiments/mlflow"
@@ -26,6 +26,12 @@ gc_collect = "mlflow gc --backend-store-uri $MLFLOW_BACKEND_STORE_URI --artifact
 
 [dependencies]
 python = ">=3.12"
+
+[feature.shared]
+channels = ["conda-forge", "nvidia", "pytorch", "bioconda"]
+platforms = ["linux-64"]
+
+[feature.shared.dependencies]
 pytorch = ">=2.9,<2.10"
 pip = "*"
 numpy = "*"
@@ -47,6 +53,8 @@ awscrt = "*"
 cloudpathlib = "*"
 gemmi = "*"
 foldseek = "*"
+awscli = "*"
+gh = "*"
 
 [pypi-dependencies]
 proteus = { path = ".", editable = true }
