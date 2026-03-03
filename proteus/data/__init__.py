@@ -1,13 +1,6 @@
-from enum import StrEnum
-
+from .constants import DataPath, DataIndexCols
 from .data_loader import DataHolder, DataHolderCfg
 from .data_utils import DataBatch
-
-
-class DataPath(StrEnum):
-	"""relative paths shared between the data pipeline and the dataloader"""
-	INDEX = "shards/index.parquet"
-	SHARDS = "shards"
 
 
 __all__ = [
@@ -15,4 +8,5 @@ __all__ = [
     "DataHolderCfg",
     "DataBatch",
     "DataPath",
+    "DataIndexCols",
 ]

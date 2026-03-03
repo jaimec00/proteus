@@ -28,7 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from proteus.types import Dict, List
 from proteus.static.constants import resname_2_one, noncanonical_parent, atoms as atom14_order
 from proteus.utils.s3_utils import upload_bytes_to_s3, upload_bytes_to_s3_sync, REGION
-from proteus.data import DataPath
+from proteus.data.constants import DataPath, DataIndexCols
 from proteus.data.downloads.proteus_dataset.conf.download import (
 	DataPipelineCfg,
 	ExperimentalDataDownloadCfg,
@@ -207,9 +207,9 @@ class DataPipeline:
 		# add cluster_id column
 		cluster_ids = [
 			clusters.get(f"{pdb}_{chain}", "")
-			for pdb, chain in zip(columns["pdb"], columns["chain"])
+			for pdb, chain in zip(columns[DataIndexCols.PDB], columns[DataIndexCols.CHAIN])
 		]
-		table = table.append_column("cluster_id", pa.array(cluster_ids))
+		table = table.append_column(DataIndexCols.CLUSTER_ID, pa.array(cluster_ids))
 		pq.write_table(table, index_path)
 
 		# upload index to s3
@@ -266,15 +266,15 @@ class ShardWriter:
 		shard_name = f"{self._source}/{self._shard_id:06d}"
 		for chain_id in chain_ids:
 			self._index_rows.append({
-				"pdb": pdb_id,
-				"chain": chain_id,
-				"source": meta["source"],
-				"shard_id": shard_name,
-				"offset": data_offset,
-				"size": len(blob),
-				"resolution": meta["resolution"],
-				"method": meta["method"],
-				"deposit_date": meta["deposit_date"],
+				DataIndexCols.PDB: pdb_id,
+				DataIndexCols.CHAIN: chain_id,
+				DataIndexCols.SOURCE: meta["source"],
+				DataIndexCols.SHARD_ID: shard_name,
+				DataIndexCols.OFFSET: data_offset,
+				DataIndexCols.SIZE: len(blob),
+				DataIndexCols.RESOLUTION: meta["resolution"],
+				DataIndexCols.METHOD: meta["method"],
+				DataIndexCols.DEPOSIT_DATE: meta["deposit_date"],
 			})
 
 		# flush if over size target
