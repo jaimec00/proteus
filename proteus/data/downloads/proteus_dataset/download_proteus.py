@@ -28,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from proteus.types import Dict, List
 from proteus.static.constants import resname_2_one, noncanonical_parent, atoms as atom14_order
 from proteus.utils.s3_utils import upload_bytes_to_s3, upload_bytes_to_s3_sync, REGION
+from proteus.data import DataPath
 from proteus.data.downloads.proteus_dataset.conf.download import (
 	DataPipelineCfg,
 	ExperimentalDataDownloadCfg,
@@ -176,7 +177,8 @@ class DataPipeline:
 
 	def run(self):
 		index_rows = self.download()
-		index_path = self.local_path / "index.parquet"
+		index_path = self.local_path / DataPath.INDEX
+		index_path.parent.mkdir(parents=True, exist_ok=True)
 
 		# build columnar dict from list of row dicts
 		columns = {}
@@ -211,7 +213,7 @@ class DataPipeline:
 		pq.write_table(table, index_path)
 
 		# upload index to s3
-		s3_index_path = self.s3_path / "shards" / "index.parquet"
+		s3_index_path = self.s3_path / DataPath.INDEX
 		upload_bytes_to_s3_sync(index_path.read_bytes(), s3_index_path)
 		logger.info(f"uploaded index to {s3_index_path}")
 
@@ -284,7 +286,7 @@ class ShardWriter:
 		self._tar.close()
 		shard_bytes = self._buf.getvalue()
 
-		shard_key = f"shards/{self._source}/{self._shard_id:06d}.tar"
+		shard_key = f"{DataPath.SHARDS}/{self._source}/{self._shard_id:06d}.tar"
 		s3_path = self._s3_prefix / shard_key
 
 		# snapshot the rows belonging to this shard before resetting
