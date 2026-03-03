@@ -30,9 +30,33 @@ three_2_one = {
 # one to three letter
 one_2_three = {one_letter: three_letter for three_letter, one_letter in three_2_one.items()}
 
-# model only predicts canonical aas for now, but the input can be non-canonical (to-do)
+# non-canonical / modified residues with digit codes, atom14 uses canonical parent ordering
+noncanonical_2_one = {
+	'MSE': '0',  # selenomethionine
+	'FME': '1',  # formylmethionine
+	'SEP': '2',  # phosphoserine
+	'TPO': '3',  # phosphothreonine
+	'HIC': '4',  # methylhistidine
+	'MVA': '5',  # methylvaline
+	'AIB': '6',  # aminoisobutyric acid
+	'UNK': 'X',  # unknown
+}
+noncanonical_parent = {
+	'MSE': 'MET',
+	'FME': 'MET',
+	'SEP': 'SER',
+	'TPO': 'THR',
+	'HIC': 'HIS',
+	'MVA': 'VAL',
+	'AIB': 'ALA',
+	'UNK': 'GLY',
+}
+
+# combined lookup: 3-letter code -> 1-letter code
+resname_2_one = {**three_2_one, **noncanonical_2_one}
+
 canonical_aas = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
-noncanonical_aas = []
+noncanonical_aas = ['0', '1', '2', '3', '4', '5', '6']
 special_chars = ["X", "<mask>"]
 alphabet = canonical_aas + noncanonical_aas + special_chars
 

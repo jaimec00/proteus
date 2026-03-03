@@ -26,7 +26,25 @@
       "Bash(pixi clean:*)",
       "Bash(python3:*)",
       "Bash(grep:*)",
-      "Bash(cat -A proteus/model/base.py | grep -n \"^\\\\t\" | head -5 2>/dev/null; cat -A proteus/model/transformer/*.py | grep -n \"^\\\\t\" | head -5 2>/dev/null)"
+      "Bash(cat -A proteus/model/base.py | grep -n \"^\\\\t\" | head -5 2>/dev/null; cat -A proteus/model/transformer/*.py | grep -n \"^\\\\t\" | head -5 2>/dev/null)",
+      "Bash(curl:*)",
+      "WebFetch(domain:gemmi.readthedocs.io)",
+      "WebFetch(domain:project-gemmi.github.io)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.wwpdb.org)",
+      "WebFetch(domain:search.rcsb.org)",
+      "WebFetch(domain:pmc.ncbi.nlm.nih.gov)",
+      "WebFetch(domain:www.embopress.org)",
+      "WebFetch(domain:link.springer.com)",
+      "WebFetch(domain:pdb-redo.eu)",
+      "Bash(rsync:*)",
+      "Bash(aws s3:*)",
+      "Bash(gh search:*)",
+      "Bash(gh api:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:rsync.pdb-redo.eu)",
+      "Bash(pixi list:*)",
+      "Bash(pixi search:*)"
     ]
   }
 }

@@ -4,226 +4,207 @@
 
 - **PDB**: experimental structures, xray and cryo-em
 - **PDB-REDO**: xray experimental structures that are refined
-- **BFVD**: AF predicted viral structures
-- **Viro3d**: AF predicted viral structures
+- **BFVD**: AF predicted viral structures (monomers only)
+- **Viro3d**: AF predicted viral structures (monomers only)
 - **AFDB**: structures predicted from AF2 from uniprot
 - **ESMAtlas**: ESMFold predicted structures from the metagenomic atlas
 
 ## per-sample data
 
-each pdb is stored as a unit. all its chains live together, zstd-compressed.
+each pdb is stored as a unit. all its chains live together in a single
+zstd-compressed npz blob (`{pdb_id}.npz.zst`).
 
-per chain:
-- atom14: L,14,3 — 3d coords
+per chain (keyed by `{chain_id}/` prefix in npz):
+- coords: L,14,3 — atom14 3d coords
 - sequence: string of one letter AA identifiers
 - atom_mask: L,14 boolean mask of valid atom coords
-- per resi plddt: L, (for predicted structures)
-- per resi bfactor: L, (for experimental structures)
+- bfactor: L, (for experimental structures)
 
-per pdb:
+per pdb (in `_meta` json entry):
 - chains: list of chain IDs
-- biounits: list of lists (inner = chains in biounit, outer = each biounit)
-- asmb_xforms: list of Nx3x3 transforms, one per biounit
+- resolution, method, deposit_date, source
+- assemblies: list of {chains, transforms (Nx4x4 homogeneous)}
+
+CA-only mmCIF files are written locally during download for foldseek input,
+then deleted after clustering.
 
 ## index
 
-small enough to fit in memory on every process. contains per chain:
-- pdb, chain, shard, offset, size (bytes), clusterid, resolution, mean plddt,
-  ptm, method (xray/cryo-em/refined/predicted), source (pdb/pdb-redo/afdb/esmatlas/viro3d/bfvd)
+parquet file, small enough to fit in memory on every process. one row per chain:
+- pdb, chain, source, shard_id, offset, size (bytes)
+- cluster_id, split (train/val/test)
+- resolution, method, mean_plddt, ptm
+
+built incrementally during shard creation, updated in bulk after clustering
+with cluster_id and split columns. uploaded to s3 once finalized.
 
 ## dataset creation
 
-### pass 1 — extraction + staging (parallel across all 6 sources)
+### download + shard (parallel across sources)
 
 for each source, in parallel:
-1. stream download the compressed archive
-2. for each pdb in the stream, extract everything at once:
-    - CA coords -> local foldseek-ready directory
-    - full chain data (atom14, sequence, atom_mask, etc.) -> zstd-compress
-      -> upload to `s3://bucket/staging/{pdb_id}.zst`
-    - metadata record -> append to local catalog (sqlite or parquet)
+1. stream download the compressed archive (or API fetch)
+2. for each pdb in the stream:
+    - serialize all chains + metadata into a single zstd-compressed npz blob
+    - append the blob to the current shard buffer
+    - when the shard buffer hits the size target (~128-256MB), finalize and
+      upload to `s3://bucket/shards/{source}/{shard_id}.tar`
+    - append per-chain rows to the local index
+    - write CA-only mmCIF per chain to local disk (for foldseek)
 3. source archive is never stored locally, just streamed
 
-peak local disk: CA coords (~100-200GB) + catalog (negligible).
-s3 staging grows to ~8TB of individual pdb objects.
-each source is streamed exactly once.
+shards are built on-the-fly during download. no staging step, no re-sharding.
+each pdb blob is written to s3 exactly once.
 
-### foldseek (global, sequential)
+shards are source-homogeneous — each shard contains pdbs from a single source.
+this allows independent re-downloading and re-sharding per source without
+touching other sources' data.
 
-1. build foldseek db from CA coords
-2. dedup with foldseek easy-linclust at high identity threshold (fast, linear time).
-   assign dups the cluster of their representative. delete dup CA coords, keep dedup mapping.
-3. cluster representatives with foldseek easy-cluster at structural similarity threshold.
-   propagate cluster ids to all chains via dedup mapping.
-4. delete CA coords entirely. only the catalog + cluster assignments remain.
-5. delete staging objects for deduped pdbs from s3
+peak local disk: CA CIFs for foldseek (~200GB). everything else streams
+directly to s3.
 
-### shard planning (in memory, fast)
+#### crash-resume via checkpoint
 
-1. read the catalog: for each pdb, know its chains and their cluster ids
-2. for each pdb, compute its cluster set (the set of clusters its chains belong to)
-3. sort pdbs using MinHash LSH on their cluster sets (see [heuristic selection](#heuristic-selection))
-4. pack sorted pdbs into shards sequentially, target ~2-4GB each
-5. write out a shard plan: ordered list of pdb_ids per shard
+the download pipeline is resumable. after each shard is uploaded to s3, its
+index rows are appended to a local `checkpoint.jsonl` file. the checkpoint
+write happens only after the s3 upload succeeds, so if a row is in the
+checkpoint, its shard is guaranteed to be in s3.
 
-### shard assembly from staging (parallel across shards)
+the checkpoint lives at the pipeline level (`tmp/checkpoint.jsonl`), not
+inside the foldseek input dir. on restart, the checkpoint is read to recover:
+which pdbs are already done, the pre-built index rows, and the next shard id.
+only remaining pdbs are downloaded. a crash mid-upload loses at most the
+current shard (re-downloaded on resume).
 
-for each shard in the plan:
-1. read the shard's ordered list of pdb_ids
-2. download each pdb blob from s3 staging in the planned order
-3. pack into an uncompressed tar, compute offsets for the index
-4. stream upload to `s3://bucket/shards/{shard_id}.tar`
-5. delete the staging objects for pdbs in this shard
+after the full pipeline completes successfully (index uploaded to s3), the
+checkpoint and cluster TSV are deleted. absence of both on the next run
+means start from scratch.
 
-many shards assembled in parallel. peak local disk: one shard buffer per
-parallel worker (~2-4GB each).
+### foldseek clustering (global, sequential)
 
-index is built during assembly — each pdb's offset and size within its shard
-is known at pack time. uploaded to s3 at the end.
+the foldseek stage is broken into granular steps, each leaving artifacts
+on disk so the pipeline can resume from whichever step completed last:
 
-as shards are finalized, staging objects are deleted. peak total s3 = ~1x
-dataset size (staging + partially built shards), not 2x.
+1. `create_db` — build foldseek db from local CA CIFs, then delete CIFs
+2. `run_cluster` — run foldseek cluster, clean up tmp dir
+3. `parse_clusters` — run createtsv, delete db files, leave `clusters.tsv`
+4. index is updated with cluster_id column and uploaded to s3
+5. `cleanup_tsv` — delete clusters.tsv only after s3 upload succeeds
 
-### summary
+on resume, the pipeline checks state in priority order:
+- `clusters.tsv` exists → skip all foldseek, just read the TSV
+- cluster db files exist → skip createdb and cluster, run createtsv
+- raw db files exist → skip createdb, run cluster + createtsv
+- nothing exists → full pipeline from createdb
 
-- each source streamed exactly once
-- local disk never exceeds ~200GB (CA coords during foldseek)
-- s3 staging is temporary, ~$6 for 8TB for a few days
-- full control over shard layout
-- shard assembly reads from s3 in any order
+clustering is used only for train/val/test splitting, not for shard layout
+or training-time sampling.
+
+### train/val/test split
+
+split is done at the cluster level on experimental structures only, so no
+structural leakage between splits.
+
+- ~95% of experimental clusters → train
+- ~2.5% → val
+- ~2.5% → test
+- all predicted sources (AFDB, ESMAtlas, BFVD, Viro3d) → train only
+
+val and test are experimental-only because evaluation should be against
+ground truth coordinates, not predicted structures.
+
+val/test pdbs remain in their original source shards. the index labels each
+chain with its split. no separate val/test shards are created. during
+evaluation, the dataloader uses byte-range requests to read only the
+specific val/test pdbs from their source shards. this is efficient because
+val/test is small and evaluated infrequently. train workers always read
+whole shards for throughput.
+
+after splitting, upload the finalized index to s3.
 
 ## shard format
 
-- unit of storage is the pdb (all its chains together, zstd-compressed)
+- unit of storage is the pdb (all its chains together, zstd-compressed npz)
 - shards are uncompressed tar archives of pdb blobs
-- target ~2-4GB per shard
-    - larger shards = fewer shard boundaries = fewer split clusters
-    - 8TB / 2GB = ~4,000 shards, 8TB / 4GB = ~2,000 shards
-    - byte-range requests mean large shard size doesn't penalize — only fetch
-      the pdbs you need
-    - want many more shards than max world_size * num_workers so each process
-      gets multiple
-
-## heuristic selection
-
-the goal is to sort pdbs so that pdbs with overlapping cluster sets end up in
-the same shard, minimizing clusters split across shard boundaries.
-
-**selected: MinHash LSH** — best tradeoff of quality vs complexity for this data.
-
-represent each pdb's cluster set as a sparse binary vector over cluster id space.
-use MinHash to compute a signature (64-256 hash functions), then sort pdbs by
-their MinHash signature. pdbs with high Jaccard similarity in their cluster sets
-get similar signatures and end up adjacent.
-
-why this works well here:
-- MinHash is designed for sparse set similarity, which is exactly what cluster
-  sets are (~1-10 clusters per pdb out of potentially millions)
-- O(N * k) where k = number of hash functions. fast at 50M pdbs.
-- captures multi-cluster overlap that simpler heuristics miss — if pdb A has
-  clusters {42, 7000} and pdb B has clusters {42, 7001}, MinHash recognizes
-  the overlap and places them nearby
-
-tradeoffs:
-- projection from high-dimensional similarity to 1D ordering is lossy. two pdbs
-  can hash nearby but share nothing, or hash far apart but share clusters. the
-  guarantee is statistical, not per-element.
-- need to tune number of hash functions. more = better quality, slower compute.
-  64-256 is typical, measure split rate on real data.
-
-### other candidates (for reference)
-
-**sort by primary cluster id** (cluster of longest chain):
-- O(N log N), trivial to implement
-- optimal for single-chain pdbs (majority of AFDB/ESMAtlas = most of the dataset)
-- ignores multi-cluster pdbs entirely. a pdb with clusters {42, 7000, 15000}
-  only gets placed near cluster 42's neighbors
-- good fallback if MinHash is overkill
-
-**sort by min cluster id**:
-- nearly identical to primary cluster sort, marginal difference
-- only better if cluster id ordering has structural meaning (fragile assumption)
-
-**greedy nearest-neighbor**:
-- iteratively place each pdb next to the one with highest cluster set overlap
-- highest local quality but O(N^2) naive — infeasible at 50M pdbs
-- paints itself into corners (locally optimal, globally suboptimal)
-- could work on subproblems (greedy within primary-cluster groups)
-
-**graph-based spectral ordering**:
-- build overlap graph, find Fiedler vector for optimal linear ordering
-- theoretically best global solution
-- infeasible at 50M nodes. could work on a coarsened graph (group by primary
-  cluster first, build graph at group level, ~millions of nodes)
-- overkill unless split rate from simpler heuristics is unacceptable
+- source-homogeneous: each shard contains pdbs from one source only
+- target ~128-256MB per shard
+    - small enough to download quickly (~1-2s) and hold in worker memory
+    - large enough to contain hundreds/thousands of pdbs for good
+      within-shard diversity
+    - 8TB / 128MB = ~62K shards, 8TB / 256MB = ~31K shards
+    - many more shards than max world_size * num_workers so each process
+      gets many shards to shuffle over
 
 ## dataloader
 
 ### core idea
 
-every process — whether a torch DataLoader worker or a DDP rank — operates
-the same way. each gets assigned contiguous shards, plans its own reads,
-fetches, and processes. no master, no dispatch, no special coordination.
-the same code works for single-GPU with num_workers and multi-GPU with DDP.
+a sample is a chain, presented in its biounit context when available.
 
-because shard planning sorted pdbs by cluster set similarity, clusters are
-concentrated on few shards. most clusters are fully contained within a single
-process's shard range. when a cluster is split across process boundaries,
-both processes sample from it — redundant but not duplicate (different pdbs,
-different chains). the MinHash heuristic minimizes this.
+every process — whether a torch DataLoader worker or a DDP rank — operates
+the same way. each gets assigned a unique random subset of shards, streams
+them from s3, and yields samples. no master, no dispatch, no special
+coordination. the same code works for single-GPU with num_workers and
+multi-GPU with DDP.
 
 ### shard assignment
 
-```
-total_processes = world_size * num_workers
-process i owns shards [i * shards_per_process, (i+1) * shards_per_process)
-```
-
-each process computes this independently, no communication.
+each process is assigned a unique random subset of all shards. assignment
+is computed independently per process from the index (filtered to train
+split), seeded deterministically so no communication is needed.
 
 ### per process, per epoch
 
-1. load the index (fits in memory). for each owned shard, the process knows
-   which pdbs are in it and which clusters those pdbs' chains belong to.
+1. load the index (fits in memory). filter to train split.
 
-2. for each owned shard, sample one chain per cluster present in that shard
-   (that hasn't been sampled yet this epoch by this process). look up which
-   pdbs contain those chains. this gives the set of (pdb, offset, size)
-   needed from this shard.
+2. shuffle owned shard order for this epoch (seeded by epoch number
+   for reproducibility).
 
-3. plan s3 reads for this shard:
-    - few pdbs needed: parallel byte-range requests for just those pdbs
-    - many pdbs or >~15% of shard bytes: download the whole shard, discard unneeded
-    - coalesce nearby byte ranges within ~64KB gap
+3. for each shard:
+    a. using only the index, randomly select one chain per pdb in the shard.
+    b. stream the shard from s3. as each pdb blob arrives in the tar stream:
+        - decompress the blob
+        - look up the pre-selected chain
+        - randomly sample an assembly (biounit) containing that chain.
+          if no assembly contains the chain, yield the chain as-is.
+        - build the biounit (apply transforms), tensorize, yield.
+    c. prefetch the next shard while processing the current one.
 
-4. fetch, decompress, parse, build biounits, tensorize, yield samples.
-   prefetch next shard while processing current one.
+each pdb in the shard produces exactly one sample. the number of samples
+per shard is known before streaming begins (= number of train pdbs in shard).
 
-### pdb cache (per process)
+### source ratios
 
-- lru cache keyed by pdb_id
-- check cache before adding a pdb to the s3 read plan
-- useful across epochs: same pdb, different chain sampled
-- useful within epoch: pdb has chains in multiple uncovered clusters
-
-### node-level shared cache (optional)
-
-- shared memory on /dev/shm keyed by pdb_id
-- processes on the same node check shared cache before s3
-- writes are idempotent, no locking for reads
+all sources are sampled at their natural frequency. source ratios are
+respected via loss weighting — experimental structures receive higher
+loss weight relative to predicted structures. this avoids complexity
+in the data pipeline and ensures every sample is seen.
 
 ### batching with packed sequences
 
 - process maintains a token budget per batch (eg max_tokens = 4096)
-- packs samples greedily, first-come-first-served
-- no sorting needed
+- a buffer of yielded samples is accumulated; once the budget is met,
+  the batch is returned
+- packing is greedy, first-come-first-served from the shard stream
+
+### val/test evaluation
+
+val/test pdbs are scattered across source shards. on first evaluation,
+the dataloader reads them via byte-range requests using offset/size from
+the index, and caches the results locally. subsequent evaluations read
+from cache, avoiding repeated s3 reads.
 
 ## why this works
 
-- zero inter-process communication
+- crash-resumable — checkpoint after each shard upload, foldseek resumes from last completed step
+- no staging, no re-sharding — each pdb written to s3 exactly once
+- source-homogeneous shards allow independent updates per source
+- streaming shard reads — low memory footprint, process blobs as they arrive
+- two-level randomness (shard order + chain selection) gives good
+  shuffling independent of source download order
+- zero inter-process communication during training
 - no data duplication, each pdb stored once
-- shard locality from MinHash sorting means most clusters are covered by one process
-- byte-range requests or full shard reads depending on what's needed
 - same code for single-GPU num_workers and multi-GPU DDP
-- packed sequences eliminate the need for length-aware shard layout
-- redundant cross-process cluster sampling is bounded by heuristic quality
+- biounits constructed from single pdb blobs, no cross-shard dependencies
+- val/test cached locally after first eval, no separate shard infrastructure
+- source ratios via loss weighting, no data pipeline complexity
