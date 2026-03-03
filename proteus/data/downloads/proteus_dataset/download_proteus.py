@@ -9,6 +9,7 @@ import logging
 import re
 import tarfile
 import aiohttp
+import boto3
 import aioboto3
 import asyncio
 import requests
@@ -27,7 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from proteus.types import Dict, List
 from proteus.static.constants import resname_2_one, noncanonical_parent, atoms as atom14_order
-from proteus.utils.s3_utils import upload_bytes_to_s3, REGION, get_session
+from proteus.utils.s3_utils import upload_bytes_to_s3, REGION
 from proteus.data.downloads.proteus_dataset.conf.download import (
 	DataPipelineCfg,
 	ExperimentalDataDownloadCfg,
@@ -224,8 +225,7 @@ class DataPipeline:
 
 def upload_bytes_to_s3_sync(data: bytes, s3_path: S3Path):
 	"""synchronous upload of bytes to S3"""
-	session = get_session(aio=False)
-	client = session.client("s3", region_name=REGION)
+	client = boto3.client("s3", region_name=REGION)
 	client.put_object(Bucket=s3_path.bucket, Key=s3_path.key, Body=data)
 
 
@@ -399,7 +399,7 @@ class ExperimentalDataDownload:
 
 		connector = aiohttp.TCPConnector(limit=self.semaphore_limit, enable_cleanup_closed=True)
 		timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_read=60)
-		s3_session = get_session(aio=True)
+		s3_session = aioboto3.Session()
 		succeeded, failed = 0, 0
 		async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session, \
 			s3_session.client("s3", region_name=REGION) as s3_client:

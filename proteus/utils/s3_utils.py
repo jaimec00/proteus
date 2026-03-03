@@ -8,26 +8,8 @@ from aiobotocore.config import AioConfig
 from boto3.s3.transfer import TransferConfig
 from cloudpathlib import S3Path
 from tqdm import tqdm
-import subprocess
-import json
 
 REGION = "us-east-1"
-
-def get_session(aio: bool=False):
-	'''
-	aws and boto3 resolve credentials differently, use aws cli to do it
-	'''
-	result = subprocess.run(
-		["aws", "configure", "export-credentials", "--format", "process"],
-		capture_output=True, text=True, check=True,
-	)
-	creds = json.loads(result.stdout)
-	aws_lib = aioboto3 if aio else boto3
-	return aws_lib.Session(
-		aws_access_key_id=creds["AccessKeyId"],
-		aws_secret_access_key=creds["SecretAccessKey"],
-		aws_session_token=creds["SessionToken"],
-	)
 
 async def _upload_dir_to_s3(local_path: Path, s3_path: S3Path, max_concurrency: int = 32) -> None:
 	"""upload a local directory to S3 with async parallel uploads"""
@@ -37,7 +19,7 @@ async def _upload_dir_to_s3(local_path: Path, s3_path: S3Path, max_concurrency: 
 	files = [f for f in local_path.rglob("*") if f.is_file()]
 	total = len(files)
 
-	session = get_session(aio=True)
+	session = aioboto3.Session()
 	aio_config = AioConfig(max_pool_connections=max_concurrency)
 	transfer_config = TransferConfig(
 		max_concurrency=20,
