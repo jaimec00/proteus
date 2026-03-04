@@ -25,43 +25,57 @@ logger = logging.getLogger(__name__)
 
 class ExperimentalDataDownload:
 	def __init__(self, cfg: ExperimentalDataDownloadCfg):
-		assert cfg.min_chain_length >= 4, \
-			f"min_chain_length must be >= 4 for foldseek clustering, got {cfg.min_chain_length}"
+
+		if cfg.min_chain_length < 4:
+			raise RuntimeError(f"min_chain_length must be >= 4 for foldseek clustering, got {cfg.min_chain_length}")
+
+		# filters
 		self.methods = set(cfg.methods)
 		self.max_resolution = cfg.max_resolution
-		self.max_entries = cfg.max_entries
 		self.min_chain_length = cfg.min_chain_length
+
+		# for debugging / testin
+		self.max_entries = cfg.max_entries
+
+		# other necessary stuff
 		self.semaphore_limit = cfg.semaphore_limit
 		self.chunk_size = cfg.chunk_size
 		self.shard_size_bytes = cfg.shard_size_mb * 1024 * 1024
 		self.zstd_level = cfg.zstd_level
+
+		# paths
 		self.s3_path = S3Path(cfg.s3_path)
 		self.local_path = Path(cfg.local_path)
 		self.checkpoint_path = Path(cfg.checkpoint_path)
 
 	def download(self):
-		pdbredo_ids = self._get_pdbredo_ids()
-		experimental_ids = self._get_experimental_ids()
 
-		# split into rcsb-only and pdb-redo lists to avoid wasted 500 probes
-		# pdbredo_ids are already lowercase, experimental_ids are normalized here
-		exp_set = set(experimental_ids)
-		pdbredo_set = pdbredo_ids & exp_set
-		rcsb_only = [pid for pid in experimental_ids if pid not in pdbredo_set]
-		pdbredo_list = [pid for pid in experimental_ids if pid in pdbredo_set]
+		# get ids, pdb redo returns all in the db, rcsb returns all with filters
+		pdbredo_ids = self._get_pdbredo_ids()
+		rcsb_ids = self._get_rcsb_ids()
+		
+		# filter out pdbs from pdb redo that arent in rcsb set, since rcsb set applied the filter
+		pdbredo_set = pdbredo_ids & rcsb_ids
+
+		# experimental should not contain any that are in pdbredo, since we give priority to higher quality pdb-redo
+		rcsb_set = rcsb_ids - pdbredo_set
+
+		pdbredo, rcsb = list(pdbredo_set), list(rcsb_set)
 
 		# apply max_entries limit split evenly across both sources
 		if self.max_entries > 0:
 			half = self.max_entries // 2
-			rcsb_only = rcsb_only[:half]
-			pdbredo_list = pdbredo_list[:self.max_entries - len(rcsb_only)]
+			rcsb = rcsb[:half]
+			pdbredo = pdbredo[:self.max_entries - len(rcsb)]
 
-		combined = rcsb_only + pdbredo_list
-		boundary = len(rcsb_only)
-		logger.info(f"{len(rcsb_only)} rcsb-only, {len(pdbredo_list)} pdb-redo entries")
+		# combine and specify where the boundary is
+		combined = rcsb + pdbredo
+		boundary = len(rcsb)
+		logger.info(f"{len(rcsb)} rcsb-only, {len(pdbredo)} pdb-redo entries")
+
 		return asyncio.run(self._download_async(combined, boundary))
 
-	def _load_checkpoint(self) -> tuple[list[dict], set[str], int]:
+	def _load_checkpoint(self) -> Tuple[List[dict], Set[str], int]:
 		"""read checkpoint from previous run. returns (index_rows, done_pdb_ids, next_shard_id)"""
 		checkpoint_path = self.checkpoint_path
 		if not checkpoint_path.exists():
@@ -193,7 +207,8 @@ class ExperimentalDataDownload:
 					return await resp.read()
 			except (aiohttp.ClientError, asyncio.TimeoutError):
 				if attempt == max_retries - 1:
-					raise
+					logger.error(f"failed to fetch {url} after {max_retries} retries, skipping")
+					return None
 				delay = 2 ** attempt
 				logger.warning(f"retry {attempt + 1}/{max_retries} for {url} (waiting {delay}s)")
 				await asyncio.sleep(delay)
@@ -272,7 +287,7 @@ class ExperimentalDataDownload:
 
 			# query each prefix in parallel
 			ids: set[str] = set()
-			with ThreadPoolExecutor(max_workers=40) as pool:
+			with ThreadPoolExecutor(max_workers=64) as pool:
 				futures = {pool.submit(_list_prefix, p): p for p in prefixes}
 				for fut in as_completed(futures):
 					try:
@@ -286,7 +301,7 @@ class ExperimentalDataDownload:
 			logger.warning(f"failed to fetch pdb-redo listing: {e}. all entries will use rcsb.")
 			return set()
 
-	def _get_experimental_ids(self) -> List[str]:
+	def _get_rcsb_ids(self) -> Set[str]:
 		# query RCSB Search API for PDB IDs matching our method and resolution criteria
 		method_nodes = [
 			{
@@ -335,7 +350,7 @@ class ExperimentalDataDownload:
 
 		if resp.status_code == 200 and resp.content:
 			results = resp.json()
-			pdbids = [hit["identifier"].lower() for hit in results.get("result_set", [])]
+			pdbids = {hit["identifier"].lower() for hit in results.get("result_set", [])}
 			logger.info(f"rcsb search returned {len(pdbids)} entries")
 		else:
 			# fallback: get all PDB IDs from holdings and let _parse_mmcif filter
@@ -345,7 +360,7 @@ class ExperimentalDataDownload:
 
 		return pdbids
 
-	def _get_holdings_ids(self) -> List[str]:
+	def _get_holdings_ids(self) -> Set[str]:
 		"""get all PDB IDs from wwPDB holdings file"""
 		url = "https://files.wwpdb.org/pub/pdb/holdings/current_file_holdings.json.gz"
 		logger.info(f"retrieving rcsb metadata at {url} ...")
@@ -353,4 +368,4 @@ class ExperimentalDataDownload:
 		resp.raise_for_status()
 		with gzip.open(io.BytesIO(resp.content), "rt") as f:
 			holdings = json.load(f)
-		return [pid.lower() for pid in holdings.keys()]
+		return {pid.lower() for pid in holdings.keys()}

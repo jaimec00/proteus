@@ -31,6 +31,7 @@ class DataPipeline:
 		self.local_path = Path(cfg.local_path)
 
 	def download(self):
+		# TODO: add other download sources
 		return self.experimental_dl.download()
 
 	def run(self):

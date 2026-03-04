@@ -4,7 +4,6 @@ import gemmi
 from proteus.types import Dict, List
 from proteus.static.constants import resname_2_one, noncanonical_parent, atoms as atom14_order
 
-
 def _parse_mmcif(content: str, methods: List[str], max_resolution: float, min_chain_length: int = 4) -> Dict | None:
 	structure = gemmi.read_structure_string(content)
 
@@ -136,8 +135,6 @@ def _parse_mmcif(content: str, methods: List[str], max_resolution: float, min_ch
 		"method": method,
 		"deposit_date": deposit_date,
 	}
-
-
 
 def _best_atom(res, atom_name: str):
 	'''find the atom with the highest occupancy'''
