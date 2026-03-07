@@ -14,9 +14,9 @@ from cloudpathlib import S3Path
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from proteus.types import Dict, List
+from proteus.types import Dict, List, Tuple, Set
 from proteus.utils.s3_utils import REGION
-from proteus.data.downloads.proteus_dataset.conf.download import ExperimentalDataDownloadCfg
+from proteus.data.downloads.proteus_dataset.conf.experimental_download import ExperimentalDataDownloadCfg
 from proteus.data.downloads.proteus_dataset.data_writing import ShardWriter, _serialize_pdb_blob
 from proteus.data.downloads.proteus_dataset.data_parsing import _parse_mmcif
 

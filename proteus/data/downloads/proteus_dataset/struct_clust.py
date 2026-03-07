@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 
 from proteus.types import Dict
-from proteus.data.downloads.proteus_dataset.conf.download import FoldSeekCfg
+from proteus.data.downloads.proteus_dataset.conf.foldseek import FoldSeekCfg
 
 
 class FoldSeek:

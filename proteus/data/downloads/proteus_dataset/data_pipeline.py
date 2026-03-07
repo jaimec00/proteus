@@ -4,7 +4,6 @@ entry point for the experimental structure data collection and cleaning pipeline
 
 import logging
 
-import hydra
 from pathlib import Path
 from cloudpathlib import S3Path
 import pyarrow as pa
@@ -12,19 +11,15 @@ import pyarrow.parquet as pq
 
 from proteus.utils.s3_utils import upload_bytes_to_s3_sync
 from proteus.data import DataPath
-from proteus.data.downloads.proteus_dataset.conf.download import (
-	DataPipelineCfg,
-	register_download_configs,
-)
+from proteus.data.downloads.proteus_dataset.conf.pipeline import DataPipelineBaseCfg
 from proteus.data.downloads.proteus_dataset.download_experimental import ExperimentalDataDownload
 from proteus.data.downloads.proteus_dataset.struct_clust import FoldSeek
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-register_download_configs()
 
 class DataPipeline:
-	def __init__(self, cfg: DataPipelineCfg):
+	def __init__(self, cfg: DataPipelineBaseCfg):
 		self.experimental_dl = ExperimentalDataDownload(cfg.experimental_dl)
 		self.foldseek = FoldSeek(cfg.foldseek)
 		self.s3_path = S3Path(cfg.s3_path)
@@ -81,12 +76,3 @@ class DataPipeline:
 		if self.experimental_dl.checkpoint_path.exists():
 			self.experimental_dl.checkpoint_path.unlink()
 			logger.info("removed checkpoint file after successful completion")
-
-@hydra.main(version_base=None, config_name="default")
-def main(cfg: DataPipelineCfg):
-	pipeline = DataPipeline(cfg)
-	pipeline.run()
-
-
-if __name__ == "__main__":
-	main()
