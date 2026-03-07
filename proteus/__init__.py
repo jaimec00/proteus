@@ -1,4 +1,4 @@
-from . import model, static, data, losses, training, types, utils, conf
+from . import model, static, data, losses, training, types, utils
 
 __all__ = [
     "model",
@@ -8,5 +8,4 @@ __all__ = [
     "training", 
     "types", 
     "utils", 
-    "conf"
 ]
