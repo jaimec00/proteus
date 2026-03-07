@@ -6,7 +6,7 @@ class ExperimentalDataDownloadCfg:
 	# filtering
 	methods: list = field(default_factory=lambda: ["X-RAY DIFFRACTION", "ELECTRON MICROSCOPY"])
 	max_resolution: float = 3.5
-	max_entries: int = 32  # -1 = all, testing for now
+	max_entries: int = 1024  # -1 = all, testing for now
 	min_chain_length: int = 10 # skip chains shorter than this (foldseek requires >= 4)
 
 	# pipeline
