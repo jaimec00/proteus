@@ -5,7 +5,7 @@ from hydra.core.config_store import ConfigStore
 from omegaconf import MISSING
 
 from proteus.training import TrainingRun, TrainingRunCfg
-from proteus.conf.register_configs import register_configs
+from proteus.training.conf.register_configs import register_configs
 from proteus.model.composed.inverse_folding.proteusAI import proteusAICfg
 from proteus.model.tokenizer import WaveFunctionTokenizerCfg
 from proteus.utils.noise_utils import LinearNoiseScheduleCfg
