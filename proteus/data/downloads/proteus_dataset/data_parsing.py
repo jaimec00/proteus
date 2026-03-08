@@ -1,20 +1,35 @@
+import logging
 import numpy as np
 import gemmi
 
 from proteus.types import Dict, List
 from proteus.static.constants import resname_2_one, noncanonical_parent, atoms as atom14_order
+from proteus.data.data_constants import ChainKey, ProteinKey
 
-def _parse_mmcif(content: str, methods: List[str], max_resolution: float, min_chain_length: int = 4) -> Dict | None:
+logger = logging.getLogger(__name__)
+
+def _parse_mmcif(
+	content: str, methods: List[str], max_resolution: float,
+	min_chain_length: int = 4, override_method: str | None = None,
+) -> Dict | None:
 	structure = gemmi.read_structure_string(content)
+	pdb_id = structure.name.lower()
 
-	# filter by experimental method
-	method = structure.info['_exptl.method'] if '_exptl.method' in structure.info else ''
-	method = method.strip("'\" ")
-	if method not in methods:
-		return None
+	# pdb-redo refined cifs don't carry _exptl.method metadata, but all pdb-redo
+	# entries are x-ray. override_method lets the caller set it explicitly so we
+	# skip the filter and still record the correct method in the index.
+	if override_method is not None:
+		method = override_method
+	else:
+		method = structure.info['_exptl.method'] if '_exptl.method' in structure.info else ''
+		method = method.strip("'\" ")
+		if method not in methods:
+			logger.info(f"{pdb_id}: skipped, method '{method}' not in {methods}")
+			return None
 
-	# filter by resolution
-	if structure.resolution > max_resolution:
+	# filter by resolution (0.0 means unset)
+	if structure.resolution == 0.0 or structure.resolution > max_resolution:
+		logger.info(f"{pdb_id}: skipped, resolution {structure.resolution:.2f} (max {max_resolution})")
 		return None
 
 	model = structure[0]
@@ -94,11 +109,11 @@ def _parse_mmcif(content: str, methods: List[str], max_resolution: float, min_ch
 						)
 
 		chains_data[chain.name] = {
-			"sequence": "".join(seq),
-			"coords": coords,
-			"atom_mask": mask,
-			"bfactor": bfactors,
-			"cif": "\n".join(cif_lines) + "\n",
+			ChainKey.SEQUENCE: "".join(seq),
+			ChainKey.COORDS: coords,
+			ChainKey.ATOM_MASK: mask,
+			ChainKey.BFACTOR: bfactors,
+			ChainKey.CIF: "\n".join(cif_lines) + "\n",
 		}
 
 	# assembly / biounit info with Nx4x4 homogeneous transforms
@@ -118,22 +133,23 @@ def _parse_mmcif(content: str, methods: List[str], max_resolution: float, min_ch
 		if not biounit_chains:
 			continue
 		assemblies.append({
-			"chains": biounit_chains,
-			"transforms": np.stack(transforms) if transforms else np.empty((0, 4, 4), dtype=np.float32),
+			ProteinKey.CHAINS: biounit_chains,
+			ProteinKey.ASMB_XFORMS: np.stack(transforms) if transforms else np.empty((0, 4, 4), dtype=np.float32),
 		})
 
 	if not chains_data:
+		logger.info(f"{pdb_id}: skipped, no chains with >= {min_chain_length} residues")
 		return None
 
 	date_key = '_pdbx_database_status.recvd_initial_deposition_date'
 	deposit_date = structure.info[date_key] if date_key in structure.info else ''
 
 	return {
-		"chains": chains_data,
-		"assemblies": assemblies,
-		"resolution": structure.resolution,
-		"method": method,
-		"deposit_date": deposit_date,
+		ProteinKey.CHAINS: chains_data,
+		ProteinKey.ASSEMBLIES: assemblies,
+		ProteinKey.RESOLUTION: structure.resolution,
+		ProteinKey.METHOD: method,
+		ProteinKey.DEPOSIT_DATE: deposit_date,
 	}
 
 def _best_atom(res, atom_name: str):

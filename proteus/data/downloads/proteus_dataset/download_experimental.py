@@ -2,6 +2,7 @@ import gzip
 import io
 import json
 import logging
+import random
 import re
 import subprocess
 import asyncio
@@ -16,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from proteus.types import Dict, List, Tuple, Set
 from proteus.utils.s3_utils import REGION
+from proteus.data.data_constants import IndexCol, DataSource, ChainKey, ProteinKey, ExpMethods
 from proteus.data.downloads.proteus_dataset.conf.experimental_download import ExperimentalDataDownloadCfg
 from proteus.data.downloads.proteus_dataset.data_writing import ShardWriter, _serialize_pdb_blob
 from proteus.data.downloads.proteus_dataset.data_parsing import _parse_mmcif
@@ -86,8 +88,8 @@ class ExperimentalDataDownload:
 		for line in checkpoint_path.read_text().splitlines():
 			row = json.loads(line)
 			index_rows.append(row)
-			done_pids.add(row["pdb"])
-			shard_num = int(row["shard_id"].rsplit("/", 1)[1])
+			done_pids.add(row[IndexCol.PDB])
+			shard_num = int(row[IndexCol.SHARD_ID].rsplit("/", 1)[1])
 			max_shard = max(max_shard, shard_num)
 		next_shard_id = max_shard + 1 if max_shard >= 0 else 0
 		logger.info(f"resume: {len(done_pids)} PDBs already done across {next_shard_id} shards")
@@ -107,8 +109,9 @@ class ExperimentalDataDownload:
 
 		pbar = tqdm(total=len(remaining), desc="downloading")
 
-		connector = aiohttp.TCPConnector(limit=self.semaphore_limit, enable_cleanup_closed=True)
+		connector = aiohttp.TCPConnector(limit=0, enable_cleanup_closed=True)
 		timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_read=60)
+		self._semaphore = asyncio.Semaphore(self.semaphore_limit)
 		s3_session = aioboto3.Session()
 		succeeded, failed = 0, 0
 		async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session, \
@@ -117,7 +120,7 @@ class ExperimentalDataDownload:
 			shard_writer = ShardWriter(
 				s3_prefix=self.s3_path,
 				shard_size_bytes=self.shard_size_bytes,
-				source="experimental",
+				source=DataSource.EXPERIMENTAL,
 				s3_client=s3_client,
 				checkpoint_path=self.checkpoint_path,
 				resume_index_rows=index_rows,
@@ -159,24 +162,26 @@ class ExperimentalDataDownload:
 		data = None
 		if is_pdb_redo:
 			data = await self._download_pdbredo(pdb_id, session)
+			if data is None:
+				logger.info(f"{pdb_id}: pdb-redo failed, falling back to rcsb")
 		if data is None:
 			data = await self._download_rcsb(pdb_id, session)
 		if data is None:
 			return None
 
 		# write ca cifs locally for foldseek
-		for chain_id, chain_data in data["chains"].items():
+		for chain_id, chain_data in data[ProteinKey.CHAINS].items():
 			cif_path = self.local_path / f"{pdb_id}_{chain_id}.cif.gz"
-			cif_path.write_bytes(gzip.compress(chain_data["cif"].encode()))
+			cif_path.write_bytes(gzip.compress(chain_data[ChainKey.CIF].encode()))
 
 		# pack into blob and add to shard
 		blob = _serialize_pdb_blob(pdb_id, data, self.zstd_level)
-		chain_ids = list(data["chains"].keys())
+		chain_ids = list(data[ProteinKey.CHAINS].keys())
 		meta = {
-			"resolution": data["resolution"],
-			"method": data["method"],
-			"deposit_date": data["deposit_date"],
-			"source": data["source"],
+			ProteinKey.RESOLUTION: data[ProteinKey.RESOLUTION],
+			ProteinKey.METHOD: data[ProteinKey.METHOD],
+			ProteinKey.DEPOSIT_DATE: data[ProteinKey.DEPOSIT_DATE],
+			ProteinKey.SOURCE: data[ProteinKey.SOURCE],
 		}
 		async with shard_lock:
 			shard_writer.add(pdb_id, blob, chain_ids, meta)
@@ -187,7 +192,7 @@ class ExperimentalDataDownload:
 		self, session: aiohttp.ClientSession, url: str,
 		max_retries: int = 3, retry_statuses: frozenset[int] | None = None,
 	) -> bytes | None:
-		"""fetch url with retries and exponential backoff. returns None on non-retryable errors.
+		"""fetch url with retries and jittered exponential backoff. returns None on non-retryable errors.
 
 		retry_statuses: HTTP status codes to retry (default: 500+). pass empty set to
 		never retry on status codes (still retries network/timeout errors).
@@ -196,21 +201,22 @@ class ExperimentalDataDownload:
 			retry_statuses = frozenset(range(500, 600))
 		for attempt in range(max_retries):
 			try:
-				async with session.get(url) as resp:
+				async with self._semaphore, session.get(url) as resp:
 					if resp.status in retry_statuses:
 						raise aiohttp.ClientResponseError(
 							resp.request_info, resp.history,
 							status=resp.status, message=f"server error {resp.status}",
 						)
 					if resp.status != 200:
+						logger.warning(f"{url}: HTTP {resp.status}")
 						return None
 					return await resp.read()
-			except (aiohttp.ClientError, asyncio.TimeoutError):
+			except (aiohttp.ClientError, asyncio.TimeoutError) as e:
 				if attempt == max_retries - 1:
-					logger.error(f"failed to fetch {url} after {max_retries} retries, skipping")
+					logger.error(f"failed to fetch {url} after {max_retries} retries ({type(e).__name__}: {e}), skipping")
 					return None
-				delay = 2 ** attempt
-				logger.warning(f"retry {attempt + 1}/{max_retries} for {url} (waiting {delay}s)")
+				delay = 2 * (2 ** attempt) * random.uniform(0.5, 1.5)
+				logger.warning(f"retry {attempt + 1}/{max_retries} for {url} ({type(e).__name__}: {e}, waiting {delay:.1f}s)")
 				await asyncio.sleep(delay)
 
 	async def _download_pdbredo(self, pdb_id: str, session: aiohttp.ClientSession):
@@ -224,10 +230,10 @@ class ExperimentalDataDownload:
 		if raw is None:
 			return None
 		content = raw.decode("utf-8")
-		data = _parse_mmcif(content, self.methods, self.max_resolution, self.min_chain_length)
+		data = _parse_mmcif(content, self.methods, self.max_resolution, self.min_chain_length, override_method=ExpMethods.XRAY)
 		if data is None:
 			return None
-		data |= {"source": "pdb-redo"}
+		data |= {ProteinKey.SOURCE: DataSource.PDB_REDO}
 		return data
 
 	async def _download_rcsb(self, pdb_id: str, session: aiohttp.ClientSession):
@@ -242,7 +248,7 @@ class ExperimentalDataDownload:
 		data = _parse_mmcif(content, self.methods, self.max_resolution, self.min_chain_length)
 		if data is None:
 			return None
-		data |= {"source": "rcsb"}
+		data |= {ProteinKey.SOURCE: DataSource.RCSB}
 		return data
 
 	def _get_pdbredo_ids(self) -> set[str]:

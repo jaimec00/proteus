@@ -13,7 +13,7 @@ defaults = [
 
 @dataclass
 class DataPipelineCfg(DataPipelineBaseCfg):
-	defaults: list = field(default_factory=defaults) 
+	defaults: list = field(default_factory=lambda: defaults) 
 	s3_path: str = "s3://proteus-data-bucket"
 	local_path: str = "/home/ubuntu/proteus/data/tmp"
 
