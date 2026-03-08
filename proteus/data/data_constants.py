@@ -51,3 +51,7 @@ class ProteinKey(enum.StrEnum):
 class NpzKey(enum.StrEnum):
 	"""special npz archive keys"""
 	META = enum.auto()
+
+class ExpMethods(enum.StrEnum):
+	XRAY = "X-RAY DIFFRACTION"
+	CRYO_EM = "ELECTRON MICROSCOPY"

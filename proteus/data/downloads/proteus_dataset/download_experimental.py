@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from proteus.types import Dict, List, Tuple, Set
 from proteus.utils.s3_utils import REGION
-from proteus.data.data_constants import IndexCol, DataSource, ChainKey, ProteinKey
+from proteus.data.data_constants import IndexCol, DataSource, ChainKey, ProteinKey, ExpMethods
 from proteus.data.downloads.proteus_dataset.conf.experimental_download import ExperimentalDataDownloadCfg
 from proteus.data.downloads.proteus_dataset.data_writing import ShardWriter, _serialize_pdb_blob
 from proteus.data.downloads.proteus_dataset.data_parsing import _parse_mmcif
@@ -230,7 +230,7 @@ class ExperimentalDataDownload:
 		if raw is None:
 			return None
 		content = raw.decode("utf-8")
-		data = _parse_mmcif(content, self.methods, self.max_resolution, self.min_chain_length, override_method="X-RAY DIFFRACTION")
+		data = _parse_mmcif(content, self.methods, self.max_resolution, self.min_chain_length, override_method=ExpMethods.XRAY)
 		if data is None:
 			return None
 		data |= {ProteinKey.SOURCE: DataSource.PDB_REDO}
