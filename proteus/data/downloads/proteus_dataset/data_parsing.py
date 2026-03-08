@@ -8,20 +8,28 @@ from proteus.data.data_constants import ChainKey, ProteinKey
 
 logger = logging.getLogger(__name__)
 
-def _parse_mmcif(content: str, methods: List[str], max_resolution: float, min_chain_length: int = 4) -> Dict | None:
+def _parse_mmcif(
+	content: str, methods: List[str], max_resolution: float,
+	min_chain_length: int = 4, override_method: str | None = None,
+) -> Dict | None:
 	structure = gemmi.read_structure_string(content)
 	pdb_id = structure.name.lower()
 
-	# filter by experimental method
-	method = structure.info['_exptl.method'] if '_exptl.method' in structure.info else ''
-	method = method.strip("'\" ")
-	if method not in methods:
-		logger.info(f"{pdb_id}: skipped, method '{method}' not in {methods}")
-		return None
+	# pdb-redo refined cifs don't carry _exptl.method metadata, but all pdb-redo
+	# entries are x-ray. override_method lets the caller set it explicitly so we
+	# skip the filter and still record the correct method in the index.
+	if override_method is not None:
+		method = override_method
+	else:
+		method = structure.info['_exptl.method'] if '_exptl.method' in structure.info else ''
+		method = method.strip("'\" ")
+		if method not in methods:
+			logger.info(f"{pdb_id}: skipped, method '{method}' not in {methods}")
+			return None
 
-	# filter by resolution
-	if structure.resolution > max_resolution:
-		logger.info(f"{pdb_id}: skipped, resolution {structure.resolution:.2f} > {max_resolution}")
+	# filter by resolution (0.0 means unset)
+	if structure.resolution == 0.0 or structure.resolution > max_resolution:
+		logger.info(f"{pdb_id}: skipped, resolution {structure.resolution:.2f} (max {max_resolution})")
 		return None
 
 	model = structure[0]

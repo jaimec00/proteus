@@ -2,6 +2,7 @@ import gzip
 import io
 import json
 import logging
+import random
 import re
 import subprocess
 import asyncio
@@ -161,6 +162,8 @@ class ExperimentalDataDownload:
 		data = None
 		if is_pdb_redo:
 			data = await self._download_pdbredo(pdb_id, session)
+			if data is None:
+				logger.info(f"{pdb_id}: pdb-redo failed, falling back to rcsb")
 		if data is None:
 			data = await self._download_rcsb(pdb_id, session)
 		if data is None:
@@ -187,9 +190,9 @@ class ExperimentalDataDownload:
 
 	async def _fetch(
 		self, session: aiohttp.ClientSession, url: str,
-		max_retries: int = 6, retry_statuses: frozenset[int] | None = None,
+		max_retries: int = 3, retry_statuses: frozenset[int] | None = None,
 	) -> bytes | None:
-		"""fetch url with retries and exponential backoff. returns None on non-retryable errors.
+		"""fetch url with retries and jittered exponential backoff. returns None on non-retryable errors.
 
 		retry_statuses: HTTP status codes to retry (default: 500+). pass empty set to
 		never retry on status codes (still retries network/timeout errors).
@@ -212,8 +215,8 @@ class ExperimentalDataDownload:
 				if attempt == max_retries - 1:
 					logger.error(f"failed to fetch {url} after {max_retries} retries ({type(e).__name__}: {e}), skipping")
 					return None
-				delay = 5 * (2 ** attempt)
-				logger.warning(f"retry {attempt + 1}/{max_retries} for {url} ({type(e).__name__}: {e}, waiting {delay}s)")
+				delay = 2 * (2 ** attempt) * random.uniform(0.5, 1.5)
+				logger.warning(f"retry {attempt + 1}/{max_retries} for {url} ({type(e).__name__}: {e}, waiting {delay:.1f}s)")
 				await asyncio.sleep(delay)
 
 	async def _download_pdbredo(self, pdb_id: str, session: aiohttp.ClientSession):
@@ -227,7 +230,7 @@ class ExperimentalDataDownload:
 		if raw is None:
 			return None
 		content = raw.decode("utf-8")
-		data = _parse_mmcif(content, self.methods, self.max_resolution, self.min_chain_length)
+		data = _parse_mmcif(content, self.methods, self.max_resolution, self.min_chain_length, override_method="X-RAY DIFFRACTION")
 		if data is None:
 			return None
 		data |= {ProteinKey.SOURCE: DataSource.PDB_REDO}
