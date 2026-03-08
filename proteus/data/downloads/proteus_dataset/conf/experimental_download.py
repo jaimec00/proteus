@@ -7,10 +7,10 @@ class ExperimentalDataDownloadCfg:
 	methods: list = field(default_factory=lambda: ["X-RAY DIFFRACTION", "ELECTRON MICROSCOPY"])
 	max_resolution: float = 3.5
 	max_entries: int = 1024  # -1 = all, testing for now
-	min_chain_length: int = 10 # skip chains shorter than this (foldseek requires >= 4)
+	min_chain_length: int = 8 # skip chains shorter than this (foldseek requires >= 4)
 
 	# pipeline
-	semaphore_limit: int = 1
+	semaphore_limit: int = 32
 	chunk_size: int = 1000
 	shard_size_mb: int = 256
 	zstd_level: int = 10

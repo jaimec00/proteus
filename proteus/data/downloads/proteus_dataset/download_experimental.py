@@ -108,8 +108,9 @@ class ExperimentalDataDownload:
 
 		pbar = tqdm(total=len(remaining), desc="downloading")
 
-		connector = aiohttp.TCPConnector(limit=self.semaphore_limit, enable_cleanup_closed=True)
+		connector = aiohttp.TCPConnector(limit=0, enable_cleanup_closed=True)
 		timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_read=60)
+		self._semaphore = asyncio.Semaphore(self.semaphore_limit)
 		s3_session = aioboto3.Session()
 		succeeded, failed = 0, 0
 		async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session, \
@@ -197,7 +198,7 @@ class ExperimentalDataDownload:
 			retry_statuses = frozenset(range(500, 600))
 		for attempt in range(max_retries):
 			try:
-				async with session.get(url) as resp:
+				async with self._semaphore, session.get(url) as resp:
 					if resp.status in retry_statuses:
 						raise aiohttp.ClientResponseError(
 							resp.request_info, resp.history,

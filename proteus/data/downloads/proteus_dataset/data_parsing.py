@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 import gemmi
 
@@ -5,17 +6,22 @@ from proteus.types import Dict, List
 from proteus.static.constants import resname_2_one, noncanonical_parent, atoms as atom14_order
 from proteus.data.data_constants import ChainKey, ProteinKey
 
+logger = logging.getLogger(__name__)
+
 def _parse_mmcif(content: str, methods: List[str], max_resolution: float, min_chain_length: int = 4) -> Dict | None:
 	structure = gemmi.read_structure_string(content)
+	pdb_id = structure.name.lower()
 
 	# filter by experimental method
 	method = structure.info['_exptl.method'] if '_exptl.method' in structure.info else ''
 	method = method.strip("'\" ")
 	if method not in methods:
+		logger.info(f"{pdb_id}: skipped, method '{method}' not in {methods}")
 		return None
 
 	# filter by resolution
 	if structure.resolution > max_resolution:
+		logger.info(f"{pdb_id}: skipped, resolution {structure.resolution:.2f} > {max_resolution}")
 		return None
 
 	model = structure[0]
@@ -124,6 +130,7 @@ def _parse_mmcif(content: str, methods: List[str], max_resolution: float, min_ch
 		})
 
 	if not chains_data:
+		logger.info(f"{pdb_id}: skipped, no chains with >= {min_chain_length} residues")
 		return None
 
 	date_key = '_pdbx_database_status.recvd_initial_deposition_date'
