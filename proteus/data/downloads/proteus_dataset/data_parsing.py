@@ -3,6 +3,7 @@ import gemmi
 
 from proteus.types import Dict, List
 from proteus.static.constants import resname_2_one, noncanonical_parent, atoms as atom14_order
+from proteus.data.data_constants import ChainKey, ProteinKey
 
 def _parse_mmcif(content: str, methods: List[str], max_resolution: float, min_chain_length: int = 4) -> Dict | None:
 	structure = gemmi.read_structure_string(content)
@@ -94,11 +95,11 @@ def _parse_mmcif(content: str, methods: List[str], max_resolution: float, min_ch
 						)
 
 		chains_data[chain.name] = {
-			"sequence": "".join(seq),
-			"coords": coords,
-			"atom_mask": mask,
-			"bfactor": bfactors,
-			"cif": "\n".join(cif_lines) + "\n",
+			ChainKey.SEQUENCE: "".join(seq),
+			ChainKey.COORDS: coords,
+			ChainKey.ATOM_MASK: mask,
+			ChainKey.BFACTOR: bfactors,
+			ChainKey.CIF: "\n".join(cif_lines) + "\n",
 		}
 
 	# assembly / biounit info with Nx4x4 homogeneous transforms
@@ -118,8 +119,8 @@ def _parse_mmcif(content: str, methods: List[str], max_resolution: float, min_ch
 		if not biounit_chains:
 			continue
 		assemblies.append({
-			"chains": biounit_chains,
-			"transforms": np.stack(transforms) if transforms else np.empty((0, 4, 4), dtype=np.float32),
+			ProteinKey.CHAINS: biounit_chains,
+			ProteinKey.ASMB_XFORMS: np.stack(transforms) if transforms else np.empty((0, 4, 4), dtype=np.float32),
 		})
 
 	if not chains_data:
@@ -129,11 +130,11 @@ def _parse_mmcif(content: str, methods: List[str], max_resolution: float, min_ch
 	deposit_date = structure.info[date_key] if date_key in structure.info else ''
 
 	return {
-		"chains": chains_data,
-		"assemblies": assemblies,
-		"resolution": structure.resolution,
-		"method": method,
-		"deposit_date": deposit_date,
+		ProteinKey.CHAINS: chains_data,
+		ProteinKey.ASSEMBLIES: assemblies,
+		ProteinKey.RESOLUTION: structure.resolution,
+		ProteinKey.METHOD: method,
+		ProteinKey.DEPOSIT_DATE: deposit_date,
 	}
 
 def _best_atom(res, atom_name: str):

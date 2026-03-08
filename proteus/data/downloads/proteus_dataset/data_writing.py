@@ -10,8 +10,8 @@ from pathlib import Path
 from cloudpathlib import S3Path
 
 from proteus.types import Dict
-from proteus.data import DataPath
 from proteus.utils.s3_utils import upload_bytes_to_s3
+from proteus.data.data_constants import DataPath, IndexCol, ChainKey, ProteinKey, NpzKey
 
 logger = logging.getLogger(__name__)
 
@@ -58,15 +58,15 @@ class ShardWriter:
 		shard_name = f"{self._source}/{self._shard_id:06d}"
 		for chain_id in chain_ids:
 			self._index_rows.append({
-				"pdb": pdb_id,
-				"chain": chain_id,
-				"source": meta["source"],
-				"shard_id": shard_name,
-				"offset": data_offset,
-				"size": len(blob),
-				"resolution": meta["resolution"],
-				"method": meta["method"],
-				"deposit_date": meta["deposit_date"],
+				IndexCol.PDB: pdb_id,
+				IndexCol.CHAIN: chain_id,
+				IndexCol.SOURCE: meta[ProteinKey.SOURCE],
+				IndexCol.SHARD_ID: shard_name,
+				IndexCol.OFFSET: data_offset,
+				IndexCol.SIZE: len(blob),
+				IndexCol.RESOLUTION: meta[ProteinKey.RESOLUTION],
+				IndexCol.METHOD: meta[ProteinKey.METHOD],
+				IndexCol.DEPOSIT_DATE: meta[ProteinKey.DEPOSIT_DATE],
 			})
 
 		# flush if over size target
@@ -125,25 +125,25 @@ def _serialize_pdb_blob(pdb_id: str, data: Dict, zstd_level: int = 10) -> bytes:
 	  - _chains (list of chain IDs, for ordering)
 	"""
 	arrays = {}
-	chain_ids = list(data["chains"].keys())
-	for chain_id, chain_data in data["chains"].items():
-		arrays[f"{chain_id}/coords"] = chain_data["coords"]
-		arrays[f"{chain_id}/atom_mask"] = chain_data["atom_mask"]
-		arrays[f"{chain_id}/bfactor"] = chain_data["bfactor"]
-		arrays[f"{chain_id}/sequence"] = np.array(chain_data["sequence"])
+	chain_ids = list(data[ProteinKey.CHAINS].keys())
+	for chain_id, chain_data in data[ProteinKey.CHAINS].items():
+		arrays[f"{chain_id}/{ChainKey.COORDS}"] = chain_data[ChainKey.COORDS]
+		arrays[f"{chain_id}/{ChainKey.ATOM_MASK}"] = chain_data[ChainKey.ATOM_MASK]
+		arrays[f"{chain_id}/{ChainKey.BFACTOR}"] = chain_data[ChainKey.BFACTOR]
+		arrays[f"{chain_id}/{ChainKey.SEQUENCE}"] = np.array(chain_data[ChainKey.SEQUENCE])
 
 	meta = {
-		"resolution": data["resolution"],
-		"method": data["method"],
-		"deposit_date": data["deposit_date"],
-		"source": data["source"],
-		"chains": chain_ids,
-		"assemblies": [
-			{"chains": a["chains"], "transforms": a["transforms"].tolist()}
-			for a in data["assemblies"]
+		ProteinKey.RESOLUTION: data[ProteinKey.RESOLUTION],
+		ProteinKey.METHOD: data[ProteinKey.METHOD],
+		ProteinKey.DEPOSIT_DATE: data[ProteinKey.DEPOSIT_DATE],
+		ProteinKey.SOURCE: data[ProteinKey.SOURCE],
+		ProteinKey.CHAINS: chain_ids,
+		ProteinKey.ASSEMBLIES: [
+			{ProteinKey.CHAINS: a[ProteinKey.CHAINS], ProteinKey.ASMB_XFORMS: a[ProteinKey.ASMB_XFORMS].tolist()}
+			for a in data[ProteinKey.ASSEMBLIES]
 		],
 	}
-	arrays["_meta"] = np.void(json.dumps(meta).encode())
+	arrays[NpzKey.META] = np.void(json.dumps(meta).encode())
 
 	buf = io.BytesIO()
 	np.savez(buf, **arrays)
@@ -157,26 +157,26 @@ def _deserialize_pdb_blob(blob: bytes) -> Dict:
 	raw = decompressor.decompress(blob)
 	npz = np.load(io.BytesIO(raw), allow_pickle=False)
 
-	meta = json.loads(bytes(npz["_meta"]))
+	meta = json.loads(bytes(npz[NpzKey.META]))
 	chains = {}
-	for chain_id in meta["chains"]:
+	for chain_id in meta[ProteinKey.CHAINS]:
 		chains[chain_id] = {
-			"coords": npz[f"{chain_id}/coords"],
-			"atom_mask": npz[f"{chain_id}/atom_mask"],
-			"bfactor": npz[f"{chain_id}/bfactor"],
-			"sequence": str(npz[f"{chain_id}/sequence"]),
+			ChainKey.COORDS: npz[f"{chain_id}/{ChainKey.COORDS}"],
+			ChainKey.ATOM_MASK: npz[f"{chain_id}/{ChainKey.ATOM_MASK}"],
+			ChainKey.BFACTOR: npz[f"{chain_id}/{ChainKey.BFACTOR}"],
+			ChainKey.SEQUENCE: str(npz[f"{chain_id}/{ChainKey.SEQUENCE}"]),
 		}
 
 	assemblies = [
-		{"chains": a["chains"], "transforms": np.array(a["transforms"], dtype=np.float32)}
-		for a in meta["assemblies"]
+		{ProteinKey.CHAINS: a[ProteinKey.CHAINS], ProteinKey.ASMB_XFORMS: np.array(a[ProteinKey.ASMB_XFORMS], dtype=np.float32)}
+		for a in meta[ProteinKey.ASSEMBLIES]
 	]
 
 	return {
-		"chains": chains,
-		"assemblies": assemblies,
-		"resolution": meta["resolution"],
-		"method": meta["method"],
-		"deposit_date": meta["deposit_date"],
-		"source": meta["source"],
+		ProteinKey.CHAINS: chains,
+		ProteinKey.ASSEMBLIES: assemblies,
+		ProteinKey.RESOLUTION: meta[ProteinKey.RESOLUTION],
+		ProteinKey.METHOD: meta[ProteinKey.METHOD],
+		ProteinKey.DEPOSIT_DATE: meta[ProteinKey.DEPOSIT_DATE],
+		ProteinKey.SOURCE: meta[ProteinKey.SOURCE],
 	}

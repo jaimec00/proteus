@@ -10,7 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from proteus.utils.s3_utils import upload_bytes_to_s3_sync
-from proteus.data import DataPath
+from proteus.data.data_constants import DataPath, IndexCol
 from proteus.data.downloads.proteus_dataset.conf.pipeline import DataPipelineBaseCfg
 from proteus.data.downloads.proteus_dataset.download_experimental import ExperimentalDataDownload
 from proteus.data.downloads.proteus_dataset.struct_clust import FoldSeek
@@ -61,9 +61,9 @@ class DataPipeline:
 		# add cluster_id column
 		cluster_ids = [
 			clusters.get(f"{pdb}_{chain}", "")
-			for pdb, chain in zip(columns["pdb"], columns["chain"])
+			for pdb, chain in zip(columns[IndexCol.PDB], columns[IndexCol.CHAIN])
 		]
-		table = table.append_column("cluster_id", pa.array(cluster_ids))
+		table = table.append_column(IndexCol.CLUSTER_ID, pa.array(cluster_ids))
 		pq.write_table(table, index_path)
 
 		# upload index to s3
