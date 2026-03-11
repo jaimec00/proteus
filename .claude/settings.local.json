@@ -44,7 +44,8 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:rsync.pdb-redo.eu)",
       "Bash(pixi list:*)",
-      "Bash(pixi search:*)"
+      "Bash(pixi search:*)",
+      "WebFetch(domain:crates.io)"
     ]
   }
 }

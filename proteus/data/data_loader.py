@@ -17,6 +17,7 @@ import polars as pl
 
 from proteus.data.data_utils import Assembly, PDBCache, BatchBuilder, DataBatch, Sampler, PDBCacheCfg, SamplerCfg, BatchBuilderCfg
 from proteus.data.data_constants import DataPath, IndexCol, TEST_SEED, VAL_SEED, UINT64
+from proteus_hash import stable_hash
 
 @dataclass
 class DataHolderCfg:
@@ -127,18 +128,15 @@ class DataHolder:
         # for dataset clustering experiments
         split_index = (                                                                                                                                                                                     
             index.lazy()                                                                                                                                                                            
-            .with_columns( # create columns for test by sampling from test hash  
-                # TODO: make custom rust plugin for deterministic hash, this isnt 
-                # guranteed to be deterministic across versions of polars                                                                                                                                                                
-                (pl.col(IndexCol.CLUSTER_ID).hash(seed=TEST_SEED) < test_thresh)
+            .with_columns( # create columns for test by sampling from test hash
+                (stable_hash(pl.col(IndexCol.CLUSTER_ID), seed=TEST_SEED) < test_thresh)
                 .alias(_IS_TEST)                                                                                                                                                              
             )
             # remove any chain not in test who have a pdb id which is in test
             .filter(~(~pl.col(_IS_TEST) & pl.col(_IS_TEST).any().over(IndexCol.PDB)))
             .with_columns( # define splits using the above, and the val hash
                 pl.when(pl.col(_IS_TEST)).then(_TEST)
-                # TODO: same as TODO above
-                .when(pl.col(IndexCol.CLUSTER_ID).hash(seed=VAL_SEED) < val_thresh).then(_VAL)
+                .when(stable_hash(pl.col(IndexCol.CLUSTER_ID), seed=VAL_SEED) < val_thresh).then(_VAL)
                 .otherwise(_TRAIN)
                 .alias(_SPLIT)
             )

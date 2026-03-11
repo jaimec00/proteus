@@ -22,3 +22,6 @@ pixi.lock
 .vscode
 docs/_build/
 docs/api/generated/
+
+# rust
+target/
