@@ -9,39 +9,35 @@ from typing import Generator, Tuple, Optional, Any
 from dataclasses import dataclass, field
 from pathlib import Path
 import pandas as pd
+from functools import partial
+from cloudpathlib import S3Path
+import pyarrow.parquet as pq
+import pyarrow as pa
+import polars as pl
 
 from proteus.data.data_utils import Assembly, PDBCache, BatchBuilder, DataBatch, Sampler, PDBCacheCfg, SamplerCfg, BatchBuilderCfg
+from proteus.data.data_constants import DataPath, IndexCol, TEST_SEED, VAL_SEED, UINT64
 
 @dataclass
 class DataHolderCfg:
-    data_path: Path
-    num_train: int = -1
-    num_val: int = -1
-    num_test: int = -1
+    s3_bucket: S3Path
+    train_val_test_split: List = field(default_factory=lambda: [0.9, 0.05, 0.05])
+    
     batch_tokens: int = 16384
+    
     min_seq_size: int = 16
     max_seq_size: int = 16384
+    
     max_resolution: float = 3.5
     homo_thresh: float = 0.70
+    plddt_thresh: float = 0.70
+    
     asymmetric_units_only: bool = False
+    
     num_workers: int = 8
     prefetch_factor: int = 2
     rng_seed: int = 42
     buffer_size: int = 32
-
-@dataclass
-class DataCfg:
-    data_path: Path
-    clusters_df: pd.DataFrame
-    num_clusters: int = -1
-    batch_tokens: int = 16384
-    min_seq_size: int = 16
-    max_seq_size: int = 16384
-    homo_thresh: float = 0.70
-    asymmetric_units_only: bool = False
-    buffer_size: int = 32
-    seed: int = 42
-    epoch: Any = None
 
 
 class DataHolder:
@@ -51,91 +47,167 @@ class DataHolder:
     multi-chain (experimental structures): https://files.ipd.uw.edu/pub/training_sets/pdb_2021aug02.tar.gz
     '''
 
-    def __init__(self, config: DataHolderCfg) -> None:
+    def __init__(self, cfg: DataHolderCfg) -> None:
 
         # define data path and path to pdbs
-        data_path = Path(config.data_path)
-        pdb_path = data_path / "pdb"
-        train_info, val_info, test_info = self._get_splits(data_path, config.max_resolution)
+        s3_bucket = S3Path(cfg.s3_bucket)
+        index_path = s3_bucket / DataPath.INDEX
+        self.raw_index = pl.from_arrow(pq.read_table(index_path))
+        self.index = self._apply_filter(
+            self.raw_index,
+            cfg.max_resolution, 
+            cfg.plddt_thresh,
+        )
+        self.train_index, self.val_index, self.test_index = self._get_splits(
+            self.index, 
+            cfg.train_val_test_split,
+        )
 
-        def init_loader(df: pd.DataFrame, samples: int=-1) -> DataLoader:
-            '''helper to init a different loader for train val and test'''
+        # init_data = partial(
+        #     Data,
+        #     data_path=pdb_path,
+        #     clusters_df=train_info,
+        #     num_clusters=samples,
+        #     batch_tokens=cfg.batch_tokens,
+        #     min_seq_size=cfg.min_seq_size,
+        #     max_seq_size=cfg.max_seq_size,
+        #     homo_thresh=cfg.homo_thresh,
+        #     asymmetric_units_only=cfg.asymmetric_units_only,
+        #     buffer_size=cfg.buffer_size,
+        #     seed=cfg.rng_seed,
+        # )  
 
-            data = Data(DataCfg(
-                data_path=pdb_path,
-                clusters_df=df,
-                num_clusters=samples,
-                batch_tokens=config.batch_tokens,
-                min_seq_size=config.min_seq_size,
-                max_seq_size=config.max_seq_size,
-                homo_thresh=config.homo_thresh,
-                asymmetric_units_only=config.asymmetric_units_only,
-                buffer_size=config.buffer_size,
-                seed=config.rng_seed,
-            ))
+        # init_loader = partial(
+        #     DataLoader,
+        #     batch_size=None, 
+        #     num_workers=cfg.num_workers, 
+        #     collate_fn=lambda x: x,
+        #     prefetch_factor=cfg.prefetch_factor if cfg.num_workers else None, 
+        #     persistent_workers=cfg.num_workers>0
+        # )
 
-            loader = DataLoader(
-                data, 
-                batch_size=None, 
-                num_workers=config.num_workers, 
-                collate_fn=lambda x: x,
-                prefetch_factor=config.prefetch_factor if config.num_workers else None, 
-                persistent_workers=config.num_workers>0
+        # # initialize the loaders
+        # self.train = init_loader(init_data(train_info, cfg.num_train))
+        # self.val = init_loader(init_data(val_info, cfg.num_val))
+        # self.test = init_loader(init_data(test_info, cfg.num_test))
+
+    def _apply_filter(
+        self,
+        index: pl.DataFrame,
+        max_resolution: float,
+        plddt_thresh: float,
+    ) -> pl.DataFrame:
+        return (
+            index.lazy()
+            .filter(pl.col(IndexCol.RESOLUTION) <= max_resolution)
+            # TODO: add this column / data in the dataset
+            # .filter(pl.col(IndexCol.MEAN_PLDDT) >= plddt_thresh)
+            .collect()
+        )
+
+    def _get_splits(
+        self, 
+        index: pl.DataFrame,
+        train_val_test_split: List[float],
+    ) -> Tuple[pa.Table, pa.Table, pa.Table]:
+
+        # compute thresholds
+        assert sum(train_val_test_split) == 1.0
+        _, val_pct, test_pct = train_val_test_split
+        val_pct = val_pct / (1-test_pct)
+        test_thresh = int(test_pct * UINT64)
+        val_thresh = int(val_pct * UINT64)
+
+        # tmp stuff
+        _IS_TEST, _SPLIT = "_is_test", "_split"
+        _TEST, _VAL, _TRAIN = 0, 1, 2
+
+        # get splits
+        # TODO: make hashes be combos of different clustering methods (not just CLUSTER_ID) 
+        # for dataset clustering experiments
+        split_index = (                                                                                                                                                                                     
+            index.lazy()                                                                                                                                                                            
+            .with_columns( # create columns for test by sampling from test hash  
+                # TODO: make custom rust plugin for deterministic hash, this isnt 
+                # guranteed to be deterministic across versions of polars                                                                                                                                                                
+                (pl.col(IndexCol.CLUSTER_ID).hash(seed=TEST_SEED) < test_thresh)
+                .alias(_IS_TEST)                                                                                                                                                              
             )
+            # remove any chain not in test who have a pdb id which is in test
+            .filter(~(~pl.col(_IS_TEST) & pl.col(_IS_TEST).any().over(IndexCol.PDB)))
+            .with_columns( # define splits using the above, and the val hash
+                pl.when(pl.col(_IS_TEST)).then(_TEST)
+                # TODO: same as TODO above
+                .when(pl.col(IndexCol.CLUSTER_ID).hash(seed=VAL_SEED) < val_thresh).then(_VAL)
+                .otherwise(_TRAIN)
+                .alias(_SPLIT)
+            )
+            # remove any chain in train whose pdb id is in val
+            .filter(~((pl.col(_SPLIT) == _TRAIN) & (pl.col(_SPLIT) == _VAL).any().over(IndexCol.PDB)))
+            .drop(_IS_TEST) # remove _is_test
+            .collect()
+        )
 
-            return loader
-
-        # initialize the loaders
-        self.train = init_loader(train_info, config.num_train)
-        self.val = init_loader(val_info, config.num_val)
-        self.test = init_loader(test_info, config.num_test)
-
-    def _get_splits(self, data_path: Path, max_resolution: float) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-
-        # get the csv info, filter out anything above max res
-        clusters = pd.read_csv(data_path / Path("list.csv"), header=0, usecols=["CHAINID", "RESOLUTION", "CLUSTER"], engine="python")
-        clusters = clusters.loc[clusters.RESOLUTION <= max_resolution, :]
-        clusters.pop("RESOLUTION") # only need this to filter by res
-
-        # get the val and test clusters
-        with open(data_path / Path("valid_clusters.txt"), "r") as v:
-            val_clusters = [int(i) for i in v.read().split("\n") if i]
-        with open(data_path / Path("test_clusters.txt"), "r") as t:
-            test_clusters = [int(i) for i in t.read().split("\n") if i]
-
-        # split the csv accordingly
-        train_info = clusters.loc[~clusters.CLUSTER.isin(val_clusters+test_clusters), :]
-        val_info = clusters.loc[clusters.CLUSTER.isin(val_clusters), :]
-        test_info = clusters.loc[clusters.CLUSTER.isin(test_clusters), :]
-
-        return train_info, val_info, test_info
+        # split
+        train_index = (
+            split_index.lazy()
+            .filter(pl.col(_SPLIT) == _TRAIN)
+            .drop(_SPLIT)
+            .collect()
+        )                                                                                                                                        
+        val_index = (
+            split_index.lazy()
+            .filter(pl.col(_SPLIT) == _VAL)
+            .drop(_SPLIT)
+            .collect()
+        )           
+        test_index = (
+            split_index.lazy()
+            .filter(pl.col(_SPLIT) == _TEST)
+            .drop(_SPLIT)
+            .collect()
+        )         
+        return train_index, val_index, test_index
 
 class Data(IterableDataset):
-    def __init__(self, config: DataCfg) -> None:
+    def __init__(
+        self,
+        data_path: Path,
+        clusters_df: pd.DataFrame,
+        num_clusters: int = -1,
+        batch_tokens: int = 16384,
+        min_seq_size: int = 16,
+        max_seq_size: int = 16384,
+        homo_thresh: float = 0.70,
+        asymmetric_units_only: bool = False,
+        buffer_size: int = 32,
+        seed: int = 42,
+        epoch: Any = None,
+    ) -> None:
 
         super().__init__()
 
-        assert config.max_seq_size <= config.batch_tokens, f"max_seq_size ({config.max_seq_size}) must be <= batch_tokens ({config.batch_tokens})"
+        assert max_seq_size <= batch_tokens, f"max_seq_size ({max_seq_size}) must be <= batch_tokens ({batch_tokens})"
 
         # keep a cache of pdbs
         self._pdb_cache = PDBCache(PDBCacheCfg(
-            pdb_path=config.data_path,
-            min_seq_size=config.min_seq_size,
-            max_seq_size=config.max_seq_size,
-            homo_thresh=config.homo_thresh,
-            asymmetric_units_only=config.asymmetric_units_only
+            pdb_path=data_path,
+            min_seq_size=min_seq_size,
+            max_seq_size=max_seq_size,
+            homo_thresh=homo_thresh,
+            asymmetric_units_only=asymmetric_units_only
         ))
 
         # for deterministic and UNIQUE sampling
-        self._sampler = Sampler(config.clusters_df, SamplerCfg(
-            num_clusters=config.num_clusters,
-            seed=config.seed
+        self._sampler = Sampler(clusters_df, SamplerCfg(
+            num_clusters=num_clusters,
+            seed=seed
         ))
 
         # for batch building
         self._batch_builder_config = BatchBuilderCfg(
-            batch_tokens=config.batch_tokens,
-            buffer_size=config.buffer_size
+            batch_tokens=batch_tokens,
+            buffer_size=buffer_size
         )
 
     def _get_asmb(self, row: pd.Series) -> Optional[Assembly]:

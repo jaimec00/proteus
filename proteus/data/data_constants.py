@@ -55,3 +55,8 @@ class NpzKey(enum.StrEnum):
 class ExpMethods(enum.StrEnum):
 	XRAY = "X-RAY DIFFRACTION"
 	CRYO_EM = "ELECTRON MICROSCOPY"
+
+# some stuff
+UINT64 = 0xFFFFFFFFFFFFFFFF
+_MAGIC_SEED = 43
+TEST_SEED, VAL_SEED = _MAGIC_SEED, _MAGIC_SEED + 1

@@ -57,6 +57,8 @@ foldseek = "*"
 awscli = "*"
 gh = "*"
 ipykernel = "*"
+ipywidgets = "*"
+polars = "*"
 
 [pypi-dependencies]
 proteus = { path = ".", editable = true }
