@@ -21,7 +21,6 @@ MLFLOW_REGISTRY_STORE_URI = "$MLFLOW_TRACKING_URI"
 MLFLOW_DEFAULT_ARTIFACT_ROOT = "$EXP_DIR/artifacts"
 
 [tasks]
-build-hash = "maturin develop --release -m crates/proteus_hash/Cargo.toml"
 serve = "mlflow server"
 gc_collect = "mlflow gc --backend-store-uri $MLFLOW_BACKEND_STORE_URI --artifacts-destination $MLFLOW_DEFAULT_ARTIFACT_ROOT --tracking-uri $MLFLOW_TRACKING_URI"
 
@@ -59,14 +58,11 @@ awscli = "*"
 gh = "*"
 ipykernel = "*"
 ipywidgets = "*"
-polars = "1.38.*" # pinned — rust plugin (crates/proteus_hash) must match
-rust = ">=1.75"
-maturin = ">=1.0"
-compilers = "*"
+polars = "1.38.*" # pinned — polars_xxhash whl must match
 
 [pypi-dependencies]
 proteus = { path = ".", editable = true }
-proteus_hash = { path = "crates/proteus_hash", editable = true }
+polars_xxhash = { url = "https://github.com/jaimec00/polars-xxhash/releases/download/v0.1.0/polars_xxhash-0.1.0-1_polars_1_38-cp312-abi3-manylinux_2_28_x86_64.whl" }
 
 [feature.cpu]
 

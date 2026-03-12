@@ -45,7 +45,10 @@
       "WebFetch(domain:rsync.pdb-redo.eu)",
       "Bash(pixi list:*)",
       "Bash(pixi search:*)",
-      "WebFetch(domain:crates.io)"
+      "WebFetch(domain:crates.io)",
+      "Read(//home/ubuntu/proteus/polars-xxhash/**)",
+      "Bash(maturin build:*)",
+      "Bash(cd /home/ubuntu/proteus/polars-xxhash && gh release delete v0.1.0 --yes 2>&1 && gh release create v0.1.0 \\\\\n  \"dist/polars_xxhash-0.1.0-1_polars_1_38-cp312-abi3-manylinux_2_28_x86_64.whl\" \\\\\n  --title \"v0.1.0 — polars 1.38, python 3.12+, linux x86_64\" \\\\\n  --notes \"polars xxhash plugin wheel built against polars 1.38.* on linux x86_64 with python 3.12+ \\(abi3\\)\" \\\\\n  2>&1)"
     ]
   }
 }

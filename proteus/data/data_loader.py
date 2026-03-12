@@ -17,7 +17,7 @@ import polars as pl
 
 from proteus.data.data_utils import Assembly, PDBCache, BatchBuilder, DataBatch, Sampler, PDBCacheCfg, SamplerCfg, BatchBuilderCfg
 from proteus.data.data_constants import DataPath, IndexCol, TEST_SEED, VAL_SEED, UINT64
-from proteus_hash import stable_hash
+from polars_xxhash import stable_hash
 
 @dataclass
 class DataHolderCfg:
