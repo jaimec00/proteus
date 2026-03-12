@@ -67,6 +67,8 @@ class ShardWriter:
 				IndexCol.RESOLUTION: meta[ProteinKey.RESOLUTION],
 				IndexCol.METHOD: meta[ProteinKey.METHOD],
 				IndexCol.DEPOSIT_DATE: meta[ProteinKey.DEPOSIT_DATE],
+				IndexCol.MEAN_PLDDT: meta[ProteinKey.MEAN_PLDDT],
+				IndexCol.PTM: meta[ProteinKey.PTM],
 			})
 
 		# flush if over size target
@@ -130,6 +132,8 @@ def _serialize_pdb_blob(pdb_id: str, data: Dict, zstd_level: int = 10) -> bytes:
 		arrays[f"{chain_id}/{ChainKey.COORDS}"] = chain_data[ChainKey.COORDS]
 		arrays[f"{chain_id}/{ChainKey.ATOM_MASK}"] = chain_data[ChainKey.ATOM_MASK]
 		arrays[f"{chain_id}/{ChainKey.BFACTOR}"] = chain_data[ChainKey.BFACTOR]
+		arrays[f"{chain_id}/{ChainKey.PLDDT}"] = chain_data[ChainKey.PLDDT]
+		arrays[f"{chain_id}/{ChainKey.OCCUPANCY}"] = chain_data[ChainKey.OCCUPANCY]
 		arrays[f"{chain_id}/{ChainKey.SEQUENCE}"] = np.array(chain_data[ChainKey.SEQUENCE])
 
 	meta = {
@@ -137,6 +141,8 @@ def _serialize_pdb_blob(pdb_id: str, data: Dict, zstd_level: int = 10) -> bytes:
 		ProteinKey.METHOD: data[ProteinKey.METHOD],
 		ProteinKey.DEPOSIT_DATE: data[ProteinKey.DEPOSIT_DATE],
 		ProteinKey.SOURCE: data[ProteinKey.SOURCE],
+		ProteinKey.MEAN_PLDDT: data[ProteinKey.MEAN_PLDDT],
+		ProteinKey.PTM: data[ProteinKey.PTM],
 		ProteinKey.CHAINS: chain_ids,
 		ProteinKey.ASSEMBLIES: [
 			{ProteinKey.CHAINS: a[ProteinKey.CHAINS], ProteinKey.ASMB_XFORMS: a[ProteinKey.ASMB_XFORMS].tolist()}
@@ -164,6 +170,8 @@ def _deserialize_pdb_blob(blob: bytes) -> Dict:
 			ChainKey.COORDS: npz[f"{chain_id}/{ChainKey.COORDS}"],
 			ChainKey.ATOM_MASK: npz[f"{chain_id}/{ChainKey.ATOM_MASK}"],
 			ChainKey.BFACTOR: npz[f"{chain_id}/{ChainKey.BFACTOR}"],
+			ChainKey.PLDDT: npz[f"{chain_id}/{ChainKey.PLDDT}"],
+			ChainKey.OCCUPANCY: npz[f"{chain_id}/{ChainKey.OCCUPANCY}"],
 			ChainKey.SEQUENCE: str(npz[f"{chain_id}/{ChainKey.SEQUENCE}"]),
 		}
 
@@ -179,4 +187,6 @@ def _deserialize_pdb_blob(blob: bytes) -> Dict:
 		ProteinKey.METHOD: meta[ProteinKey.METHOD],
 		ProteinKey.DEPOSIT_DATE: meta[ProteinKey.DEPOSIT_DATE],
 		ProteinKey.SOURCE: meta[ProteinKey.SOURCE],
+		ProteinKey.MEAN_PLDDT: meta[ProteinKey.MEAN_PLDDT],
+		ProteinKey.PTM: meta[ProteinKey.PTM],
 	}

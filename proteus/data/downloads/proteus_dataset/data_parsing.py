@@ -57,7 +57,9 @@ def _parse_mmcif(
 		L = len(resolved)
 		coords = np.zeros((L, 14, 3), dtype=np.float32)
 		mask = np.zeros((L, 14), dtype=bool)
-		bfactors = np.zeros(L, dtype=np.float32)
+		bfactors = np.zeros((L, 14), dtype=np.float32)
+		occupancies = np.zeros((L, 14), dtype=np.float32)
+		plddts = np.full(L, float('nan'), dtype=np.float32)
 		seq = []
 		# backbone atoms for foldseek (needs at least N, CA, C to compute 3Di)
 		backbone_names = ["N", "CA", "C", "O", "CB"]
@@ -95,8 +97,8 @@ def _parse_mmcif(
 				if atom is not None:
 					coords[i, j] = [atom.pos.x, atom.pos.y, atom.pos.z]
 					mask[i, j] = True
-					if atom_name == "CA":
-						bfactors[i] = atom.b_iso
+					bfactors[i, j] = atom.b_iso
+					occupancies[i, j] = atom.occ
 
 					if atom_name in backbone_names:
 						cif_atom_id += 1
@@ -113,6 +115,8 @@ def _parse_mmcif(
 			ChainKey.COORDS: coords,
 			ChainKey.ATOM_MASK: mask,
 			ChainKey.BFACTOR: bfactors,
+			ChainKey.PLDDT: plddts,
+			ChainKey.OCCUPANCY: occupancies,
 			ChainKey.CIF: "\n".join(cif_lines) + "\n",
 		}
 
@@ -150,6 +154,8 @@ def _parse_mmcif(
 		ProteinKey.RESOLUTION: structure.resolution,
 		ProteinKey.METHOD: method,
 		ProteinKey.DEPOSIT_DATE: deposit_date,
+		ProteinKey.MEAN_PLDDT: float('nan'),
+		ProteinKey.PTM: float('nan'),
 	}
 
 def _best_atom(res, atom_name: str):

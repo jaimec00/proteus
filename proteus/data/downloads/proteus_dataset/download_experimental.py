@@ -182,6 +182,8 @@ class ExperimentalDataDownload:
 			ProteinKey.METHOD: data[ProteinKey.METHOD],
 			ProteinKey.DEPOSIT_DATE: data[ProteinKey.DEPOSIT_DATE],
 			ProteinKey.SOURCE: data[ProteinKey.SOURCE],
+			ProteinKey.MEAN_PLDDT: data[ProteinKey.MEAN_PLDDT],
+			ProteinKey.PTM: data[ProteinKey.PTM],
 		}
 		async with shard_lock:
 			shard_writer.add(pdb_id, blob, chain_ids, meta)

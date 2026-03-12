@@ -16,7 +16,7 @@ class FoldSeekCfg:
 	chain_name_mode: int = 0 # 0: auto, 1: always add chain to name
 
 	# clustering
-	tmscore_threshold: float = 0.7
+	tmscore_thresholds: list[float] = field(default_factory=lambda: [0.7])
 	tmscore_threshold_mode: int = 0 # 0: alignment length, 1: query length, 2: target length
 	lddt_threshold: float = 0.0 # additional lddt filter [0.0-1.0], 0 = disabled
 	coverage: float = 0.8

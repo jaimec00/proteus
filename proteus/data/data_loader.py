@@ -16,25 +16,35 @@ import pyarrow as pa
 import polars as pl
 
 from proteus.data.data_utils import Assembly, PDBCache, BatchBuilder, DataBatch, Sampler, PDBCacheCfg, SamplerCfg, BatchBuilderCfg
-from proteus.data.data_constants import DataPath, IndexCol, TEST_SEED, VAL_SEED, UINT64
+from proteus.data.data_constants import DataPath, IndexCol, ClusteringMethod, TEST_SEED, VAL_SEED, UINT64
 from polars_xxhash import stable_hash
+
+import re
+
+def _validate_cluster_col(cluster_col: str) -> None:
+	"""validate that cluster_col is '{method}_{two_digit_number}' with a known method"""
+	m = re.fullmatch(r"(.+)_(\d{2,3})", cluster_col)
+	assert m is not None, f"cluster_col must be '{{method}}_{{threshold}}', got '{cluster_col}'"
+	method_str, _threshold = m.group(1), m.group(2)
+	ClusteringMethod(method_str) # raises ValueError if not a valid member
 
 @dataclass
 class DataHolderCfg:
     s3_bucket: S3Path
+    cluster_col: str = "foldseek_70"
     train_val_test_split: List = field(default_factory=lambda: [0.9, 0.05, 0.05])
-    
+
     batch_tokens: int = 16384
-    
+
     min_seq_size: int = 16
     max_seq_size: int = 16384
-    
+
     max_resolution: float = 3.5
     homo_thresh: float = 0.70
     plddt_thresh: float = 0.70
-    
+
     asymmetric_units_only: bool = False
-    
+
     num_workers: int = 8
     prefetch_factor: int = 2
     rng_seed: int = 42
@@ -50,17 +60,24 @@ class DataHolder:
 
     def __init__(self, cfg: DataHolderCfg) -> None:
 
+        _validate_cluster_col(cfg.cluster_col)
+
         # define data path and path to pdbs
         s3_bucket = S3Path(cfg.s3_bucket)
         index_path = s3_bucket / DataPath.INDEX
         self.raw_index = pl.from_arrow(pq.read_table(index_path))
+
+        assert cfg.cluster_col in self.raw_index.columns, \
+            f"cluster column '{cfg.cluster_col}' not found in index (columns: {self.raw_index.columns})"
+
+        self.cluster_col = cfg.cluster_col
         self.index = self._apply_filter(
             self.raw_index,
-            cfg.max_resolution, 
+            cfg.max_resolution,
             cfg.plddt_thresh,
         )
         self.train_index, self.val_index, self.test_index = self._get_splits(
-            self.index, 
+            self.index,
             cfg.train_val_test_split,
         )
 
@@ -107,7 +124,7 @@ class DataHolder:
         )
 
     def _get_splits(
-        self, 
+        self,
         index: pl.DataFrame,
         train_val_test_split: List[float],
     ) -> Tuple[pa.Table, pa.Table, pa.Table]:
@@ -123,20 +140,19 @@ class DataHolder:
         _IS_TEST, _SPLIT = "_is_test", "_split"
         _TEST, _VAL, _TRAIN = 0, 1, 2
 
-        # get splits
-        # TODO: make hashes be combos of different clustering methods (not just CLUSTER_ID) 
-        # for dataset clustering experiments
-        split_index = (                                                                                                                                                                                     
-            index.lazy()                                                                                                                                                                            
-            .with_columns( # create columns for test by sampling from test hash
-                (stable_hash(pl.col(IndexCol.CLUSTER_ID), seed=TEST_SEED) < test_thresh)
-                .alias(_IS_TEST)                                                                                                                                                              
+        # hash the cluster column to assign splits
+        cluster_col = self.cluster_col
+        split_index = (
+            index.lazy()
+            .with_columns(
+                (stable_hash(pl.col(cluster_col), seed=TEST_SEED) < test_thresh)
+                .alias(_IS_TEST)
             )
             # remove any chain not in test who have a pdb id which is in test
             .filter(~(~pl.col(_IS_TEST) & pl.col(_IS_TEST).any().over(IndexCol.PDB)))
-            .with_columns( # define splits using the above, and the val hash
+            .with_columns(
                 pl.when(pl.col(_IS_TEST)).then(_TEST)
-                .when(stable_hash(pl.col(IndexCol.CLUSTER_ID), seed=VAL_SEED) < val_thresh).then(_VAL)
+                .when(stable_hash(pl.col(cluster_col), seed=VAL_SEED) < val_thresh).then(_VAL)
                 .otherwise(_TRAIN)
                 .alias(_SPLIT)
             )

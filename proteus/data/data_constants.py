@@ -12,7 +12,8 @@ class IndexCol(enum.StrEnum):
 	RESOLUTION = enum.auto()
 	METHOD = enum.auto()
 	DEPOSIT_DATE = enum.auto()
-	CLUSTER_ID = enum.auto()
+	MEAN_PLDDT = enum.auto()
+	PTM = enum.auto()
 
 
 class DataSource(enum.StrEnum):
@@ -22,12 +23,23 @@ class DataSource(enum.StrEnum):
 	RCSB = enum.auto()
 
 
+class ClusteringMethod(enum.StrEnum):
+	FOLDSEEK = enum.auto()
+
+
+def cluster_col_name(method: ClusteringMethod, threshold: float) -> str:
+	"""dynamic column name for a clustering threshold, e.g. foldseek_70"""
+	return f"{method}_{int(threshold * 100)}"
+
+
 class ChainKey(enum.StrEnum):
 	"""per-chain data dict keys"""
 	SEQUENCE = enum.auto()
 	COORDS = enum.auto()
 	ATOM_MASK = enum.auto()
 	BFACTOR = enum.auto()
+	PLDDT = enum.auto()
+	OCCUPANCY = enum.auto()
 	CIF = enum.auto()
 
 
@@ -46,6 +58,8 @@ class ProteinKey(enum.StrEnum):
 	METHOD = enum.auto()
 	DEPOSIT_DATE = enum.auto()
 	SOURCE = enum.auto()
+	MEAN_PLDDT = enum.auto()
+	PTM = enum.auto()
 
 
 class NpzKey(enum.StrEnum):
