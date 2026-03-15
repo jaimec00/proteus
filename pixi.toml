@@ -35,7 +35,6 @@ platforms = ["linux-64"]
 pytorch = ">=2.9,<2.10"
 pip = "*"
 numpy = "*"
-pandas = "*"
 pathlib = "*"
 tmtools = "*"
 tqdm = "*"
