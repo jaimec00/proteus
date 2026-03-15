@@ -29,27 +29,40 @@ def _validate_cluster_col(cluster_col: str) -> None:
 	ClusteringMethod(method_str) # raises ValueError if not a valid member
 
 @dataclass
+class DataSplitInfoCfg:
+	num_clusters: int = -1
+	max_samples_per_cluster: int = -1
+
+@dataclass
+class DataSplitCfg:
+	train: DataSplitInfoCfg = field(default_factory=DataSplitInfoCfg)
+	val: DataSplitInfoCfg = field(default_factory=DataSplitInfoCfg)
+	test: DataSplitInfoCfg = field(default_factory=DataSplitInfoCfg)
+
+@dataclass
 class DataHolderCfg:
-    s3_bucket: S3Path
-    cluster_col: str = "foldseek_70"
-    cluster_split_cols: List[str] = field(default_factory=lambda: ["foldseek_70", "mmseqs_30"])
-    train_val_test_split: List = field(default_factory=lambda: [0.9, 0.05, 0.05])
+	s3_bucket: S3Path
+	cluster_col: str = "foldseek_70"
+	cluster_split_cols: List[str] = field(default_factory=lambda: ["foldseek_70", "mmseqs_30"])
+	train_val_test_split: List = field(default_factory=lambda: [0.9, 0.05, 0.05])
 
-    batch_tokens: int = 16384
+	batch_tokens: int = 16384
 
-    min_seq_size: int = 16
-    max_seq_size: int = 16384
+	min_seq_size: int = 16
+	max_seq_size: int = 16384
 
-    max_resolution: float = 3.5
-    homo_thresh: float = 0.70
-    plddt_thresh: float = 0.70
+	max_resolution: float = 3.5
+	homo_thresh: float = 0.70
+	plddt_thresh: float = 0.70
 
-    asymmetric_units_only: bool = False
+	asymmetric_units_only: bool = False
 
-    num_workers: int = 8
-    prefetch_factor: int = 2
-    rng_seed: int = 42
-    buffer_size: int = 32
+	split_limit: DataSplitCfg = field(default_factory=DataSplitCfg)
+
+	num_workers: int = 8
+	prefetch_factor: int = 2
+	rng_seed: int = 42
+	buffer_size: int = 32
 
 
 class DataHolder:
@@ -86,10 +99,13 @@ class DataHolder:
             cfg.max_resolution,
             cfg.plddt_thresh,
         )
-        self.train_index, self.val_index, self.test_index = self._get_splits(
+        train, val, test = self._get_splits(
             self.index,
             cfg.train_val_test_split,
         )
+        self.train_index = self._limit_index(train, cfg.split_limit.train)
+        self.val_index = self._limit_index(val, cfg.split_limit.val)
+        self.test_index = self._limit_index(test, cfg.split_limit.test)
 
         # init_data = partial(
         #     Data,
@@ -118,6 +134,18 @@ class DataHolder:
         # self.train = init_loader(init_data(train_info, cfg.num_train))
         # self.val = init_loader(init_data(val_info, cfg.num_val))
         # self.test = init_loader(init_data(test_info, cfg.num_test))
+
+    def _limit_index(
+        self,
+        index: pl.DataFrame,
+        split_info: DataSplitInfoCfg,
+    ) -> pl.DataFrame:
+        if split_info.num_clusters != -1:
+            keep_clusters = index[self.cluster_col].unique().sort()[:split_info.num_clusters]
+            index = index.filter(pl.col(self.cluster_col).is_in(keep_clusters))
+        if split_info.max_samples_per_cluster != -1:
+            index = index.group_by(self.cluster_col, maintain_order=True).head(split_info.max_samples_per_cluster)
+        return index
 
     def _apply_filter(
         self,
