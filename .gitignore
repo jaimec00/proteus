@@ -23,5 +23,9 @@ pixi.lock
 docs/_build/
 docs/api/generated/
 
+# claude code
+.claude/plans/
+.claude/projects/
+
 # rust
 target/
