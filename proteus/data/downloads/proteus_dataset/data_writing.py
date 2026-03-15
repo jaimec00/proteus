@@ -155,6 +155,7 @@ def _serialize_pdb_blob(pdb_id: str, data: Dict, zstd_level: int = 10) -> bytes:
 			for a in data[ProteinKey.ASSEMBLIES]
 		],
 	}
+	# np.void wraps raw bytes — npz cannot store strings natively
 	arrays[NpzKey.META] = np.void(json.dumps(meta).encode())
 
 	buf = io.BytesIO()

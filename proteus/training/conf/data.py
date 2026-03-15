@@ -8,7 +8,7 @@ class DefaultData(DataHolderCfg):
 	s3_bucket: str = "s3://proteus-data"
 	cluster_col: str = "foldseek_70"
 	cluster_split_cols: List[str] = field(default_factory=lambda: ["foldseek_70", "mmseqs_30"])
-	train_val_test_split: List = field(default_factory=lambda: [0.9, 0.05, 0.05])
+	train_val_test_split: List[float] = field(default_factory=lambda: [0.9, 0.05, 0.05])
 	split_limit: DataSplitCfg = field(default_factory=DataSplitCfg)
 	batch_tokens: int = 65536
 	min_seq_size: int = 16

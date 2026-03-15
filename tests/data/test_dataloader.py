@@ -17,6 +17,7 @@ from proteus.data.data_constants import IndexCol, ProteinKey, ChainKey
 
 # ── S3Orchestrator ──
 
+@pytest.mark.cpu
 class TestS3Orchestrator:
 
 	@pytest.mark.cpu
