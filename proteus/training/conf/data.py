@@ -5,41 +5,48 @@ from typing import List
 
 @dataclass
 class DefaultData(DataHolderCfg):
-    data_path: str = "/home/ubuntu/proteinDiffVirgina/data/pdb_2021aug02"
-    cluster_split_cols: List[str] = field(default_factory=lambda: ["foldseek_70", "mmseqs_30"])
-    split_limit: DataSplitCfg = field(default_factory=DataSplitCfg)
-    batch_tokens: int = 65536
-    min_seq_size: int = 16
-    max_seq_size: int = 512
-    filters: DataFilterCfg = field(default_factory=DataFilterCfg)
-    homo_thresh: float = 0.7
-    asymmetric_units_only: bool = False
-    num_workers: int = 16
-    prefetch_factor: int = 8
-    rng_seed: int = 6000
-    buffer_size: int = 64
+	s3_bucket: str = "s3://proteus-data"
+	cluster_col: str = "foldseek_70"
+	cluster_split_cols: List[str] = field(default_factory=lambda: ["foldseek_70", "mmseqs_30"])
+	train_val_test_split: List = field(default_factory=lambda: [0.9, 0.05, 0.05])
+	split_limit: DataSplitCfg = field(default_factory=DataSplitCfg)
+	batch_tokens: int = 65536
+	min_seq_size: int = 16
+	max_seq_size: int = 512
+	filters: DataFilterCfg = field(default_factory=DataFilterCfg)
+	homo_thresh: float = 0.7
+	asymmetric_units_only: bool = False
+	num_workers: int = 16
+	prefetch_factor: int = 8
+	rng_seed: int = 6000
+	buffer_size: int = 64
 
 @dataclass
 class XSmallSeqData(DefaultData):
-    max_seq_size: int = 128
+	s3_bucket: str = "s3://proteus-data"
+	max_seq_size: int = 128
 @dataclass
 class SmallSeqData(DefaultData):
-    max_seq_size: int = 512
+	s3_bucket: str = "s3://proteus-data"
+	max_seq_size: int = 512
 @dataclass
 class MediumSeqData(DefaultData):
-    max_seq_size: int = 1024
+	s3_bucket: str = "s3://proteus-data"
+	max_seq_size: int = 1024
 @dataclass
 class LargeSeqData(DefaultData):
-    max_seq_size: int = 8192
+	s3_bucket: str = "s3://proteus-data"
+	max_seq_size: int = 8192
 @dataclass
 class XLargeSeqData(DefaultData):
-    max_seq_size: int = 8192
+	s3_bucket: str = "s3://proteus-data"
+	max_seq_size: int = 8192
 
 def register_data():
-    cs = ConfigStore.instance()
-    cs.store(name="default", node=DefaultData, group="data")
-    cs.store(name="extra_small_seq", node=XSmallSeqData, group="data")
-    cs.store(name="small_seq", node=SmallSeqData, group="data")
-    cs.store(name="medium_seq", node=MediumSeqData, group="data")
-    cs.store(name="large_seq", node=LargeSeqData, group="data")
-    cs.store(name="extra_large_seq", node=XLargeSeqData, group="data")
+	cs = ConfigStore.instance()
+	cs.store(name="default", node=DefaultData, group="data")
+	cs.store(name="extra_small_seq", node=XSmallSeqData, group="data")
+	cs.store(name="small_seq", node=SmallSeqData, group="data")
+	cs.store(name="medium_seq", node=MediumSeqData, group="data")
+	cs.store(name="large_seq", node=LargeSeqData, group="data")
+	cs.store(name="extra_large_seq", node=XLargeSeqData, group="data")

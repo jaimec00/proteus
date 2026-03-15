@@ -1,448 +1,511 @@
 from __future__ import annotations
 
 from torch.utils.data import get_worker_info
-from torch.nn.utils.rnn import pad_sequence
 import torch
 
 from bisect import insort, bisect_right
 from collections import defaultdict
-from dataclasses import dataclass
-from pathlib import Path
-import pandas as pd
+from dataclasses import dataclass, field
 import numpy as np
-import hashlib
 import random
+import logging
 
-from proteus.static.constants import aa_2_lbl, seq_2_lbls
+import polars as pl
+
+from proteus.static.constants import seq_2_lbls, aa_2_lbl
 from proteus.types import A, T, Float, Int, Bool, List, Dict, Tuple, Generator, Optional, Any
 from proteus.data.construct_registry import ConstructRegistry, InputNames
+from proteus.data.data_constants import DataPath, IndexCol, ProteinKey, ChainKey
+from proteus.data.downloads.proteus_dataset.data_writing import _deserialize_pdb_blob
+from proteus.utils.s3_utils import read_byte_range
+
+logger = logging.getLogger(__name__)
+
+BIG_PRIME = 6_364_136_223_846_793_005
 
 
-@dataclass
-class SamplerCfg:
-    num_clusters: int = -1
-    seed: int = 42
-
-@dataclass
-class BatchBuilderCfg:
-    batch_tokens: int = 16384
-    buffer_size: int = 32
-
-@dataclass
-class PDBCacheCfg:
-    pdb_path: Path
-    min_seq_size: int = 16
-    max_seq_size: int = 16384
-    homo_thresh: float = 0.70
-    asymmetric_units_only: bool = False
+# --- S3 orchestrator: groups and coalesces byte ranges by shard ---
 
 @dataclass
-class PDBDataCfg:
-    pdb: str
-    pdb_path: Path
-    min_seq_size: int = 16
-    max_seq_size: int = 16384
-    homo_thresh: float = 0.70
-    asymmetric_units_only: bool = False
+class BlobEntry:
+	pdb: str
+	chain: str
+	offset: int
+	size: int
+
+@dataclass
+class ReadGroup:
+	shard_id: str
+	byte_start: int
+	byte_end: int
+	entries: list[BlobEntry]
+
+
+class S3Orchestrator:
+	"""pure computation — groups entries by shard and coalesces nearby byte ranges"""
+
+	def __init__(self, gap_threshold: int = 64 * 1024):
+		self._gap_threshold = gap_threshold
+
+	def plan_reads(
+		self,
+		entries: list[tuple[str, int, int]],
+		chain_ids: list[tuple[str, str]],
+	) -> list[ReadGroup]:
+		# group by shard_id
+		by_shard: dict[str, list[tuple[BlobEntry, int]]] = defaultdict(list)
+		for (shard_id, offset, size), (pdb, chain) in zip(entries, chain_ids):
+			entry = BlobEntry(pdb=pdb, chain=chain, offset=offset, size=size)
+			by_shard[shard_id].append((entry, offset))
+
+		groups: list[ReadGroup] = []
+		for shard_id, items in by_shard.items():
+			# sort by offset
+			items.sort(key=lambda x: x[1])
+
+			# coalesce entries whose gap is below threshold
+			cur_entries: list[BlobEntry] = [items[0][0]]
+			cur_start = items[0][0].offset
+			cur_end = items[0][0].offset + items[0][0].size
+
+			for entry, _ in items[1:]:
+				entry_end = entry.offset + entry.size
+				if entry.offset - cur_end <= self._gap_threshold:
+					cur_entries.append(entry)
+					cur_end = max(cur_end, entry_end)
+				else:
+					groups.append(ReadGroup(
+						shard_id=shard_id,
+						byte_start=cur_start,
+						byte_end=cur_end,
+						entries=cur_entries,
+					))
+					cur_entries = [entry]
+					cur_start = entry.offset
+					cur_end = entry_end
+
+			groups.append(ReadGroup(
+				shard_id=shard_id,
+				byte_start=cur_start,
+				byte_end=cur_end,
+				entries=cur_entries,
+			))
+
+		return groups
+
+
+# --- S3 reader: fetches byte ranges, deserializes blobs ---
+
+class S3Reader:
+	"""stateless utility that fetches byte ranges from S3 and deserializes protein blobs"""
+
+	def __init__(self, s3_bucket: str):
+		self._bucket = s3_bucket
+		self._client = None
+
+	def _get_client(self):
+		# lazy init per worker (boto3 clients are not fork-safe)
+		if self._client is None:
+			import boto3
+			from proteus.utils.s3_utils import REGION
+			self._client = boto3.client("s3", region_name=REGION)
+		return self._client
+
+	def read_group(self, group: ReadGroup) -> list[tuple[BlobEntry, dict]]:
+		client = self._get_client()
+		key = f"{DataPath.SHARDS}/{group.shard_id}.tar"
+		raw = read_byte_range(self._bucket, key, group.byte_start, group.byte_end, client=client)
+
+		# deduplicate by (pdb, offset) — same blob shared by multiple chains
+		seen: dict[tuple[str, int], dict] = {}
+		results: list[tuple[BlobEntry, dict]] = []
+
+		for entry in group.entries:
+			dedup_key = (entry.pdb, entry.offset)
+			if dedup_key not in seen:
+				local_start = entry.offset - group.byte_start
+				blob_bytes = raw[local_start:local_start + entry.size]
+				seen[dedup_key] = _deserialize_pdb_blob(blob_bytes)
+			results.append((entry, seen[dedup_key]))
+
+		return results
+
+
+# --- PDBData: thin wrapper around a deserialized protein dict ---
+
+class PDBData:
+	"""wraps a deserialized protein dict, provides assembly sampling"""
+
+	def __init__(
+		self,
+		pdb_dict: dict,
+		min_seq_size: int,
+		max_seq_size: int,
+		homo_thresh: float,
+		asymmetric_units_only: bool,
+	):
+		self._pdb_dict = pdb_dict
+		self._min_seq_size = min_seq_size
+		self._max_seq_size = max_seq_size
+		self._homo_thresh = homo_thresh
+		self._asymmetric_units_only = asymmetric_units_only
+
+		# build chain name -> index mapping from meta chain list
+		chain_list = list(pdb_dict[ProteinKey.CHAINS].keys())
+		self._chain_to_idx = {c: i for i, c in enumerate(chain_list)}
+
+	def sample_asmb(self, chain: str) -> Optional[Assembly]:
+		chains_data = self._pdb_dict[ProteinKey.CHAINS]
+
+		if chain not in chains_data:
+			return None
+
+		# find assemblies containing this chain
+		assemblies = self._pdb_dict[ProteinKey.ASSEMBLIES]
+		valid_asmb_ids = [
+			i for i, a in enumerate(assemblies)
+			if chain in a[ProteinKey.CHAINS]
+		]
+
+		# pick an assembly (or use chain alone with identity xform)
+		if valid_asmb_ids:
+			asmb_id = random.choice(valid_asmb_ids)
+			asmb = assemblies[asmb_id]
+			asmb_chains = list(asmb[ProteinKey.CHAINS])
+		else:
+			asmb_id = -1
+			asmb_chains = [chain]
+
+		# shuffle but keep target chain first
+		asmb_chains = [chain] + random.sample(
+			[c for c in asmb_chains if c != chain],
+			k=len(asmb_chains) - 1,
+		)
+
+		labels_list = []
+		coords_list = []
+		atom_mask_list = []
+		chain_info = []
+		trgt_chain_idx = self._chain_to_idx[chain]
+
+		for asmb_chain in asmb_chains:
+			if asmb_chain not in chains_data:
+				continue
+			cd = chains_data[asmb_chain]
+
+			seq_labels = seq_2_lbls(cd[ChainKey.SEQUENCE])
+			coords = cd[ChainKey.COORDS].astype(np.float32)
+			mask = cd[ChainKey.ATOM_MASK].astype(bool)
+
+			# replace nans
+			coords[np.isnan(coords)] = 0.0
+
+			labels_list.append(seq_labels)
+			coords_list.append(coords)
+			atom_mask_list.append(mask)
+			chain_info.append((self._chain_to_idx[asmb_chain], mask.shape[0]))
+
+		if not labels_list:
+			return None
+
+		labels = np.concatenate(labels_list, axis=0)
+		coords = np.concatenate(coords_list, axis=0)
+		atom_mask = np.concatenate(atom_mask_list, axis=0)
+
+		# homo chains from tm score matrix (shape: N x N)
+		tm_scores = self._pdb_dict.get(ProteinKey.CHAIN_TM_SCORES)
+		if tm_scores is not None and trgt_chain_idx < tm_scores.shape[0]:
+			homo_chains = np.arange(len(self._chain_to_idx))[
+				tm_scores[trgt_chain_idx, :] >= self._homo_thresh
+			]
+		else:
+			homo_chains = np.array([trgt_chain_idx], dtype=np.intp)
+
+		# assembly transform
+		if self._asymmetric_units_only or asmb_id == -1:
+			asmb_xform = np.eye(4, dtype=np.float32)[np.newaxis]
+		else:
+			asmb_xform = asmb[ProteinKey.ASMB_XFORMS]
+
+		return Assembly(
+			coords, labels, atom_mask,
+			chain_info, trgt_chain_idx, homo_chains,
+			asmb_xform, self._max_seq_size, self._min_seq_size,
+		)
+
+
+# --- Sampler: deterministic, epoch-aware, worker-partitioned ---
 
 class Sampler:
-    def __init__(self, clusters_df: pd.DataFrame, cfg: SamplerCfg, epoch: int = 0) -> None:
-        self._base_seed: int = cfg.seed
-        self._epoch: int = epoch
-        self._big_prime: int = 1_000_003
+	"""owns the index and S3Orchestrator — generates deterministic read plans per epoch"""
 
-        # init the df w/ cluster info, prune if not -1, ie for dataset set size experiments, simple for now, not ideal
-        self._num_clusters = min(cfg.num_clusters if cfg.num_clusters!=-1 else float("inf"), len(clusters_df.CLUSTER.drop_duplicates()))
-        allowed_clusters = clusters_df.CLUSTER.drop_duplicates().iloc[:self._num_clusters]
-        self._clusters_df = clusters_df.loc[clusters_df.CLUSTER.isin(allowed_clusters), :]
+	def __init__(
+		self,
+		index: pl.DataFrame,
+		cluster_col: str,
+		base_seed: int,
+		is_val_or_test: bool = False,
+	):
+		self._index = index
+		self._cluster_col = cluster_col
+		self._base_seed = base_seed
+		self._is_val_or_test = is_val_or_test
+		self._epoch = 0
+		self._orchestrator = S3Orchestrator()
 
-    def _get_rand_state(self, rng: np.random.Generator) -> int:
-        return int(rng.integers(0, 2**32 - 1, dtype=np.uint32))
+	@property
+	def epoch(self) -> int:
+		return self._epoch
 
-    def _get_rng(self) -> np.random.Generator:
-        self._epoch += 1
-        return np.random.default_rng((self._base_seed + self._epoch*self._big_prime) % 2**32)
+	@epoch.setter
+	def epoch(self, value: int) -> None:
+		self._epoch = value
 
-    def _partition_pdbs(self, pdb: str, num_workers: int) -> int:
-        h = hashlib.blake2b(pdb.encode('utf-8'), digest_size=8, key=b'arbitrary_string_for_determinism').digest()
-        return int.from_bytes(h, 'big') % num_workers
+	def sample(self, num_workers: int, worker_id: int) -> list[ReadGroup]:
+		# deterministic seed
+		if self._is_val_or_test:
+			seed = self._base_seed
+		else:
+			seed = (self._base_seed + self._epoch * BIG_PRIME) % (2**64)
 
-    def sample_rows(self) -> pd.DataFrame:
+		rng = np.random.default_rng(seed)
 
-        # get worker info to partition the samples
-        worker_info = get_worker_info()
-        if worker_info is None: # single process
-            wid, num_workers = 0, 1
-        else: # multi process
-            wid, num_workers = worker_info.id, worker_info.num_workers
+		# sample one row per cluster (sort first for determinism across runs)
+		sample_seed = int(rng.integers(0, 2**32, dtype=np.uint64))
+		sampled = self._index.sort(self._cluster_col, IndexCol.PDB, IndexCol.CHAIN).group_by(
+			self._cluster_col, maintain_order=True,
+		).agg(
+			pl.all().sample(n=1, seed=sample_seed)
+		).explode(pl.all().exclude(self._cluster_col))
 
-        # sample rows using deterministic rng
-        rng = self._get_rng()
-        sampled_rows = (    self._clusters_df
-                            .groupby("CLUSTER")
-                            .sample(n=1, random_state=self._get_rand_state(rng)) # first sample gets one chain from each cluster
-                            .sample(frac=1, random_state=self._get_rand_state(rng)) # second is to randomly shuffle chains
-                        )
+		# extract columns for orchestrator
+		entries = list(zip(
+			sampled[IndexCol.SHARD_ID].to_list(),
+			sampled[IndexCol.OFFSET].to_list(),
+			sampled[IndexCol.SIZE].to_list(),
+		))
+		chain_ids = list(zip(
+			sampled[IndexCol.PDB].to_list(),
+			sampled[IndexCol.CHAIN].to_list(),
+		))
 
-        # each worker only uses its assigned pdbs, via the partition function. ensures no duplicate caches
-        worker_mask = sampled_rows.CHAINID.map(lambda p: self._partition_pdbs(p.split("_")[0], num_workers) == wid)
+		# plan coalesced reads
+		groups = self._orchestrator.plan_reads(entries, chain_ids)
 
-        return sampled_rows[worker_mask]
+		# deterministic shuffle
+		shuffle_order = rng.permutation(len(groups)).tolist()
+		groups = [groups[i] for i in shuffle_order]
 
-    def __len__(self) -> int:
-        return self._num_clusters
+		# partition across workers
+		return groups[worker_id::num_workers]
+
+	def __len__(self) -> int:
+		return len(self._index[self._cluster_col].unique())
+
+
+# --- BatchBuilder ---
 
 class BatchBuilder:
-    def __init__(self, cfg: BatchBuilderCfg) -> None:
+	def __init__(self, batch_tokens: int, buffer_size: int) -> None:
+		self._buffer: List[Assembly] = []
+		self._cur_batch: List[Assembly] = []
+		self._cur_tokens: int = 0
+		self._buffer_size: int = buffer_size
+		self._batch_tokens: int = batch_tokens
 
-        # init buffer, batch, and token count
-        self._buffer: List[Assembly] = []
-        self._cur_batch: List[Assembly] = []
-        self._cur_tokens: int = 0
-        self._buffer_size: int = cfg.buffer_size
-        self._batch_tokens: int = cfg.batch_tokens
+	def add_sample(self, sample: Assembly) -> Generator[DataBatch, None, None]:
+		self._add_buffer(sample)
 
-    def add_sample(self, sample: Assembly) -> Generator[DataBatch, None, None]:
-        
-        self._add_buffer(sample)
+		if self._buffer_full():
+			if self._batch_full():
+				yield from self._yield_batch()
+				self._clear_batch()
+			self._add_batch()
 
-        if self._buffer_full():
-            if self._batch_full():
-                yield from self._yield_batch()
-                self._clear_batch()
-            self._add_batch()
+	def drain_buffer(self) -> Generator[DataBatch, None, None]:
+		while self._buffer:
+			if self._batch_full():
+				yield from self._yield_batch()
+				self._clear_batch()
+			self._add_batch()
 
-    def drain_buffer(self) -> Generator[DataBatch, None, None]:
+		if self._cur_batch:
+			yield from self._yield_batch()
 
-        # all assemblies have been batched or in buffer, empty the buffer
-        while self._buffer:
-            if self._batch_full():
-                yield from self._yield_batch()
-                self._clear_batch()
-            self._add_batch()
+	def _yield_batch(self):
+		data_batch = DataBatch(self._cur_batch)
+		if not data_batch.is_empty:
+			yield data_batch
 
-        # if not empty, yield the last batch
-        if self._cur_batch:
-            yield from self._yield_batch()
+	def _add_buffer(self, asmb: Assembly) -> None:
+		insort(self._buffer, asmb, key=len)
 
-    def _yield_batch(self):
-        data_batch = DataBatch(self._cur_batch)
-        if not data_batch.is_empty:
-            yield data_batch
+	def _add_batch(self) -> None:
+		remaining = self._batch_tokens - self._cur_tokens
+		idx = bisect_right(self._buffer, remaining, key=len) - 1
+		assert idx >= 0, f"_add_batch called but nothing fits: {remaining=}, smallest={len(self._buffer[0])}"
+		sampled_asmb = self._buffer.pop(idx)
+		self._cur_batch.append(sampled_asmb)
+		self._cur_tokens += len(sampled_asmb)
 
-    def _add_buffer(self, asmb: Assembly) -> None:
-        insort(self._buffer, asmb, key=len)
+	def _clear_batch(self) -> None:
+		self._cur_batch.clear()
+		self._cur_tokens = 0
 
-    def _add_batch(self) -> None:
-        remaining = self._batch_tokens - self._cur_tokens
-        # find the largest assembly that fits in remaining capacity
-        idx = bisect_right(self._buffer, remaining, key=len) - 1
-        assert idx >= 0, f"_add_batch called but nothing fits: {remaining=}, smallest={len(self._buffer[0])}"
-        sampled_asmb = self._buffer.pop(idx)
-        self._cur_batch.append(sampled_asmb)
-        self._cur_tokens += len(sampled_asmb)
+	def _buffer_full(self) -> bool:
+		return len(self._buffer) >= self._buffer_size
 
-    def _clear_batch(self) -> None:
-        self._cur_batch.clear()
-        self._cur_tokens = 0            
-    
-    def _buffer_full(self) -> bool:
-        return len(self._buffer)>=self._buffer_size
+	def _batch_full(self) -> bool:
+		return (self._cur_tokens + (len(self._buffer[0]) if self._buffer else 0) > self._batch_tokens) and self._cur_tokens > 0
 
-    def _batch_full(self) -> bool:
-        return (self._cur_tokens + (len(self._buffer[0]) if self._buffer else 0) > self._batch_tokens) and self._cur_tokens > 0
 
+# --- DataBatch ---
 
 class DataBatch:
 
-    @torch.no_grad()
-    def __init__(self, batch_list: List[Assembly]) -> None:
-        
-        if not batch_list:
-            raise ValueError()
+	@torch.no_grad()
+	def __init__(self, batch_list: List[Assembly]) -> None:
 
-        batch_dict = defaultdict(list)
-        seq_lens = []
-        tot_tokens = 0
+		if not batch_list:
+			raise ValueError()
 
-        for idx, asmb in enumerate(batch_list):
-            constructed = asmb.construct()
-            if constructed is None:
-                continue
-            for key, value in constructed.items():
-                tokens = value.size(0)
-                if not tokens:
-                    break
-                if key == "labels":
-                    seq_lens.append(tokens)
-                    tot_tokens += tokens
-                batch_dict[key].append(value)
+		batch_dict = defaultdict(list)
+		seq_lens = []
+		tot_tokens = 0
 
-        self.is_empty = not seq_lens
-        if self.is_empty:
-            return 
+		for idx, asmb in enumerate(batch_list):
+			constructed = asmb.construct()
+			if constructed is None:
+				continue
+			for key, value in constructed.items():
+				tokens = value.size(0)
+				if not tokens:
+					break
+				if key == "labels":
+					seq_lens.append(tokens)
+					tot_tokens += tokens
+				batch_dict[key].append(value)
 
-        self.sample_idx = torch.cat([torch.full((i,), idx) for idx, i in enumerate(seq_lens)], dim=0)
-        seq_lens = torch.tensor(seq_lens, dtype=torch.int, device="cpu")
-        self.max_seqlen = seq_lens.max().item()
-        self.samples = seq_lens.size(0)
+		self.is_empty = not seq_lens
+		if self.is_empty:
+			return
 
-        self.cu_seqlens = torch.nn.functional.pad(seq_lens.cumsum(dim=0), pad=(1,0), mode="constant", value=0).int()
-        
-        assert InputNames.LABELS in batch_dict
-        assert InputNames.LOSS_MASK in batch_dict
-        self._tensor_names = list(batch_dict.keys()) + [InputNames.CU_SEQLENS, InputNames.SAMPLE_IDX] 
-        for tensor_name, tensor_list in batch_dict.items():
-            tensor = torch.cat(tensor_list, dim=0)
-            setattr(self, tensor_name, tensor)
-    
-    @property
-    def loss_tokens(self):
-        return self.loss_mask.sum()
-        
-    @property
-    def tokens(self):
-        return self.loss_mask.size(0)
-        
-    def move_to(self, device: torch.device) -> None:
-        if not hasattr(self, "_tensor_names"):
-            raise ValueError(f"no tensors!! the data batch is probably empty: {self.is_empty=}")
-        for tensor_name in self._tensor_names:
-            tensor = getattr(self, tensor_name)
-            if isinstance(tensor, T):
-                setattr(self, tensor_name, tensor.to(device))
+		self.sample_idx = torch.cat([torch.full((i,), idx) for idx, i in enumerate(seq_lens)], dim=0)
+		seq_lens = torch.tensor(seq_lens, dtype=torch.int, device="cpu")
+		self.max_seqlen = seq_lens.max().item()
+		self.samples = seq_lens.size(0)
 
-    def __len__(self) -> int:
-        return self.tokens
+		self.cu_seqlens = torch.nn.functional.pad(seq_lens.cumsum(dim=0), pad=(1, 0), mode="constant", value=0).int()
 
-class PDBCache:
-    def __init__(self, cfg: PDBCacheCfg) -> None:
-        self._cache: Dict[str, PDBData] = {} # {pdb: pdb_data}
-        self._cfg: PDBCacheCfg = cfg
+		assert InputNames.LABELS in batch_dict
+		assert InputNames.LOSS_MASK in batch_dict
+		self._tensor_names = list(batch_dict.keys()) + [InputNames.CU_SEQLENS, InputNames.SAMPLE_IDX]
+		for tensor_name, tensor_list in batch_dict.items():
+			tensor = torch.cat(tensor_list, dim=0)
+			setattr(self, tensor_name, tensor)
 
-    def _add_pdb(self, pdb: str) -> None:
-        self._cache[pdb] = PDBData(PDBDataCfg(
-            pdb=pdb,
-            pdb_path=self._cfg.pdb_path,
-            min_seq_size=self._cfg.min_seq_size,
-            max_seq_size=self._cfg.max_seq_size,
-            homo_thresh=self._cfg.homo_thresh,
-            asymmetric_units_only=self._cfg.asymmetric_units_only
-        ))
+	@property
+	def loss_tokens(self):
+		return self.loss_mask.sum()
 
-    def get_pdb(self, pdb: str) -> PDBData:
-        if pdb not in self._cache:
-            self._add_pdb(pdb)
-        return self._cache[pdb]
+	@property
+	def tokens(self):
+		return self.loss_mask.size(0)
 
-class PDBData:
-    def __init__(self, cfg: PDBDataCfg) -> None:
+	def move_to(self, device: torch.device) -> None:
+		if not hasattr(self, "_tensor_names"):
+			raise ValueError(f"no tensors!! the data batch is probably empty: {self.is_empty=}")
+		for tensor_name in self._tensor_names:
+			tensor = getattr(self, tensor_name)
+			if isinstance(tensor, T):
+				setattr(self, tensor_name, tensor.to(device))
 
-        # load the metadata
-        self._base_path: Path = cfg.pdb_path / Path(cfg.pdb[1:3])
-        self._pdb: str = cfg.pdb
-        metadata: Dict[str, Any] = torch.load(self._base_path / Path(self._pdb + ".pt"), weights_only=True, map_location="cpu")
+	def __len__(self) -> int:
+		return self.tokens
 
-        # remove any keys not used (most is just pdb metadata), convert to np if possible
-        removed_keys: set = {"method", "date", "resolution", "id", "asmb_details", "asmb_method", "asmb_ids"}
-        self._metadata: Dict[str, Any] = {key: (metadata[key].numpy() if isinstance(metadata[key], T) else metadata[key]) for key in metadata.keys() if key not in removed_keys}
 
-        # change this to a dict instead of list
-        self._metadata["chains"] = {c: i for i, c in enumerate(self._metadata["chains"])}
-
-        # other stuff
-        self._chain_cache: Dict[str, Optional[Dict[str, Any]]] = {} # {chain: chain_data}
-        self._min_seq_size: int = cfg.min_seq_size
-        self._max_seq_size: int = cfg.max_seq_size
-        self._homo_thresh: float = cfg.homo_thresh
-        self._asymmetric_units_only: bool = cfg.asymmetric_units_only
-
-    def sample_asmb(self, chain: str) -> Optional[Assembly]:
-        
-        # sample an asmb that contains this chain
-        asmb_id = random.choice(self._get_chain(chain)["asmb_ids"])
-
-        # get the other chains in this assembly
-        if asmb_id == -1: # -1 means just itself
-            asmb_chains = [chain]
-        else:
-            asmb_chains = self._metadata["asmb_chains"][asmb_id].split(",")
-
-        # shuffle the asmb chains to vary their order, only matters when we need to crop
-        # make sure the target chain is always first though, since we would rather not crop that one
-        asmb_chains = [chain] + random.sample([c for c in asmb_chains if c!=chain], k=len(asmb_chains)-1)
-
-        # init lists
-        labels = []
-        coords = []
-        atom_mask = []
-        chain_info = [] # list of (chain_idx, size)
-        trgt_chain_idx = self._metadata["chains"][chain] # get the chain idx of the target chain
-
-        # construct tensors
-        for asmb_chain in asmb_chains:
-
-            # get the data for this chain
-            asmb_chain_data = self._get_chain(asmb_chain)
-            if asmb_chain_data is None:
-                continue
-            
-            # extract tensors            
-            labels.append(asmb_chain_data["seq"]) # vectorizes the conversion from str -> labels
-            coords.append(asmb_chain_data["xyz"])
-            atom_mask.append(asmb_chain_data["mask"])
-            chain_info.append((self._metadata["chains"][asmb_chain], asmb_chain_data["mask"].shape[0]))
-
-        # cat
-        labels = np.concatenate(labels, axis=0)
-        coords = np.concatenate(coords, axis=0)
-        atom_mask = np.concatenate(atom_mask, axis=0)
-
-        # mask for homo chain
-        homo_chains = np.arange(len(self._metadata["chains"]))[self._metadata["tm"][trgt_chain_idx, :, 1]>=self._homo_thresh]
-
-        # get the corresponding xform
-        asmb_xform = (
-            np.expand_dims(np.eye(4), 0) 
-            if self._asymmetric_units_only 
-            or asmb_id == -1 
-            else self._metadata[f"asmb_xform{asmb_id}"]
-        )
-
-        # init the assembly, also applies the xform and takes care of cropping based on max size
-        asmb = Assembly(coords, labels, atom_mask,
-                        chain_info, trgt_chain_idx, homo_chains,
-                        asmb_xform, self._max_seq_size, self._min_seq_size
-                    )
-
-        return asmb
-
-    def _get_chain(self, chain: str) -> Optional[Dict[str, Any]]:
-
-        # add chain to cache if not in there
-        if chain not in self._chain_cache:
-            self._add_chain(chain)
-
-        # get the data
-        return self._chain_cache[chain]
-
-    def _add_chain(self, chain: str) -> None:
-
-        # load the chain data
-        chain_path = self._base_path / Path(self._pdb + f"_{chain}.pt")
-        if not chain_path.exists():
-            self._chain_cache[chain] = None
-            return
-        chain_data = torch.load(chain_path, weights_only=True, map_location="cpu")
-
-        # remove unnecessary keys
-        used_keys = {"seq", "xyz", "mask"}
-        chain_data = {key: chain_data[key].numpy() if isinstance(chain_data[key], T) else chain_data[key] for key in chain_data.keys() if key in used_keys}
-        chain_data["seq"] = seq_2_lbls(chain_data["seq"])# convert to labels
-        chain_data["xyz"][np.isnan(chain_data["xyz"])] = 0.0 # replace nans with 0
-
-        # crop to max seq size
-        chain_data["seq"] = chain_data["seq"][:self._max_seq_size] 
-        chain_data["xyz"] = chain_data["xyz"][:self._max_seq_size, :, :] 
-        chain_data["mask"] = chain_data["mask"][:self._max_seq_size, :] 
-
-        # keep a list of the biounits this chain is a part of
-        chain_data["asmb_ids"] = []
-        for asmb_id, asmb in enumerate(self._metadata["asmb_chains"]):
-            if chain in asmb.split(","):
-                chain_data["asmb_ids"].append(asmb_id)
-        
-        if not chain_data["asmb_ids"]:
-            chain_data["asmb_ids"] = [-1] # signifies the only chain is itself
-
-        # add to the cache
-        self._chain_cache[chain] = chain_data
+# --- Assembly ---
 
 class Assembly:
-    def __init__(self,     coords: Float[A, "L 14 3"], labels: Int[A, "L"], atom_mask: Bool[A, "L 14"],
-                        chain_info: List[Tuple[int, int]], trgt_chain: int, homo_chains: Int[A, "H"],
-                        asmb_xform: Float[A, "N 4 4"], max_seq_size: int, min_seq_size: int = 0
-                    ) -> None:
+	def __init__(
+		self,
+		coords: Float[A, "L 14 3"], labels: Int[A, "L"], atom_mask: Bool[A, "L 14"],
+		chain_info: List[Tuple[int, int]], trgt_chain: int, homo_chains: Int[A, "H"],
+		asmb_xform: Float[A, "N 4 4"], max_seq_size: int, min_seq_size: int = 0,
+	) -> None:
 
-        self.coords = coords
-        self.labels = labels
-        self.atom_mask = atom_mask
+		self.coords = coords
+		self.labels = labels
+		self.atom_mask = atom_mask
 
-        self._chain_info = chain_info
-        self._trgt_chain = trgt_chain
-        self._homo_chains = homo_chains
+		self._chain_info = chain_info
+		self._trgt_chain = trgt_chain
+		self._homo_chains = homo_chains
 
-        self.asmb_xform = asmb_xform
-        self._min_seq_size = min_seq_size
+		self.asmb_xform = asmb_xform
+		self._min_seq_size = min_seq_size
 
-        self._crop(max_seq_size)
+		self._crop(max_seq_size)
 
-    @torch.no_grad()
-    def construct(self) -> Optional[Dict[str, T]]:
+	@torch.no_grad()
+	def construct(self) -> Optional[Dict[str, T]]:
 
-        coords = torch.from_numpy(self.coords).float()
-        labels = torch.from_numpy(self.labels).long()
+		coords = torch.from_numpy(self.coords).float()
+		labels = torch.from_numpy(self.labels).long()
 
-        # compute seq idxs and chain idxs, note that need to crop in case labels was cropped earlier
-        seq_idx = torch.cat([torch.arange(size) for _, size in self._chain_info], dim=0)[:labels.size(0)].long()
-        chain_idx = torch.cat([torch.full((size,), idx) for idx, size in self._chain_info], dim=0)[:labels.size(0)].long()
+		# compute seq idxs and chain idxs, note that need to crop in case labels was cropped earlier
+		seq_idx = torch.cat([torch.arange(size) for _, size in self._chain_info], dim=0)[:labels.size(0)].long()
+		chain_idx = torch.cat([torch.full((size,), idx) for idx, size in self._chain_info], dim=0)[:labels.size(0)].long()
 
-        # make the masks to remove invalid (no coords)
-        atom_mask = torch.from_numpy(self.atom_mask).bool()
-        valid_mask = atom_mask[..., :3].all(dim=-1)  # L
+		# make the masks to remove invalid (no coords)
+		atom_mask = torch.from_numpy(self.atom_mask).bool()
+		valid_mask = atom_mask[..., :3].all(dim=-1)
 
-        # clean up invalid,
-        coords = coords[valid_mask]
-        labels = labels[valid_mask]
-        seq_idx = seq_idx[valid_mask]
-        chain_idx = chain_idx[valid_mask]
+		coords = coords[valid_mask]
+		labels = labels[valid_mask]
+		seq_idx = seq_idx[valid_mask]
+		chain_idx = chain_idx[valid_mask]
 
-        # perform the xform on coords and adjust the other tensors accordingly
-        asmb_xform = torch.from_numpy(self.asmb_xform).float()
+		# perform the xform on coords and adjust the other tensors accordingly
+		asmb_xform = torch.from_numpy(self.asmb_xform).float()
 
-        # check how many copies you can make based on max size param. 
-        N, A, S = coords.shape
-        num_copies = asmb_xform.size(0) # this means we prefer making less copies over cropping chains
+		N, A, S = coords.shape
+		num_copies = asmb_xform.size(0)
 
-        R = asmb_xform[:, :3, :3] # num_copies x 3 x 3
-        T = asmb_xform[:, :3, 3] # num_copies x 3
+		R = asmb_xform[:, :3, :3]
+		T = asmb_xform[:, :3, 3]
 
-        # adjust sizes based on the number of copies made
-        coords = (torch.einsum("bij,raj->brai", R, coords) + T.view(num_copies, 1,1,3)).reshape(N*num_copies, A, S)
-        labels = labels.repeat(num_copies)
-        seq_idx = seq_idx.repeat(num_copies)
-        chain_idx = chain_idx.repeat(num_copies)
+		coords = (torch.einsum("bij,raj->brai", R, coords) + T.view(num_copies, 1, 1, 3)).reshape(N * num_copies, A, S)
+		labels = labels.repeat(num_copies)
+		seq_idx = seq_idx.repeat(num_copies)
+		chain_idx = chain_idx.repeat(num_copies)
 
-        trgt_mask = chain_idx == self._trgt_chain
-        homo_mask = torch.isin(chain_idx, torch.from_numpy(self._homo_chains))
-        caa_mask = labels != aa_2_lbl("X")  # L
+		trgt_mask = chain_idx == self._trgt_chain
+		homo_mask = torch.isin(chain_idx, torch.from_numpy(self._homo_chains))
+		caa_mask = labels != aa_2_lbl("X")
 
-        result = ConstructRegistry.construct(
-            coords, labels, seq_idx, chain_idx, trgt_mask, homo_mask, caa_mask, atom_mask
-        )
+		result = ConstructRegistry.construct(
+			coords, labels, seq_idx, chain_idx, trgt_mask, homo_mask, caa_mask, atom_mask
+		)
 
-        # filter after invalids removed and xforms applied
-        if result["labels"].size(0) < self._min_seq_size:
-            return None
+		if result["labels"].size(0) < self._min_seq_size:
+			return None
 
-        return result
+		return result
 
-        
-    @torch.no_grad()
-    def _crop(self, max_seq_size: int) -> None:
+	@torch.no_grad()
+	def _crop(self, max_seq_size: int) -> None:
 
-        # check how many copies you can make based on max size param. 
-        N, A, S = self.coords.shape
-        num_copies = min(max_seq_size//N, self.asmb_xform.shape[0]) # this means we prefer making less copies over cropping chains
+		N, A, S = self.coords.shape
+		num_copies = min(max_seq_size // N, self.asmb_xform.shape[0])
 
-        if num_copies == 0: # this means N>max_size, so need to crop N
-            self.coords = self.coords[:max_seq_size, :, :]
-            self.labels = self.labels[:max_seq_size]
-            self.atom_mask = self.atom_mask[:max_seq_size, :]
-            self.asmb_xform = np.expand_dims(np.eye(4), 0)
-        else:
-            self.asmb_xform = self.asmb_xform[:num_copies, :, :]
+		if num_copies == 0:
+			self.coords = self.coords[:max_seq_size, :, :]
+			self.labels = self.labels[:max_seq_size]
+			self.atom_mask = self.atom_mask[:max_seq_size, :]
+			self.asmb_xform = np.expand_dims(np.eye(4), 0)
+		else:
+			self.asmb_xform = self.asmb_xform[:num_copies, :, :]
 
-    def __len__(self) -> int:
-        return self.labels.shape[0]*self.asmb_xform.shape[0]
-
+	def __len__(self) -> int:
+		return self.labels.shape[0] * self.asmb_xform.shape[0]

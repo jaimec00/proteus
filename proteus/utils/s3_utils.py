@@ -69,3 +69,11 @@ def upload_bytes_to_s3_sync(data: bytes, s3_path: S3Path) -> None:
 def upload_dir_to_s3(local_path: Path, s3_path: S3Path, max_concurrency: int = 32) -> None:
 	"""sync wrapper for async S3 directory upload"""
 	asyncio.run(_upload_dir_to_s3(local_path, s3_path, max_concurrency))
+
+
+def read_byte_range(bucket: str, key: str, start: int, end: int, client=None) -> bytes:
+	"""fetch a byte range from S3 using an HTTP Range request (inclusive start, exclusive end)"""
+	if client is None:
+		client = boto3.client("s3", region_name=REGION)
+	resp = client.get_object(Bucket=bucket, Key=key, Range=f"bytes={start}-{end - 1}")
+	return resp["Body"].read()

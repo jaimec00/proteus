@@ -1,22 +1,22 @@
 
 
+
 from __future__ import annotations
 
-from torch.utils.data import IterableDataset, DataLoader
+from torch.utils.data import IterableDataset, DataLoader, get_worker_info
 import torch
 
 from typing import Generator, Tuple, Optional, Any, List
 from dataclasses import dataclass, field
-from pathlib import Path
-import pandas as pd
 from functools import partial
 from cloudpathlib import S3Path
-import pyarrow as pa
 import polars as pl
 import logging
 import re
 
-from proteus.data.data_utils import Assembly, PDBCache, BatchBuilder, DataBatch, Sampler, PDBCacheCfg, SamplerCfg, BatchBuilderCfg
+from proteus.data.data_utils import (
+	Assembly, BatchBuilder, DataBatch, Sampler, S3Reader, PDBData, ReadGroup,
+)
 from proteus.data.data_constants import DataPath, IndexCol, ClusteringMethod, TEST_SEED, VAL_SEED, UINT64
 from proteus.utils.s3_utils import REGION
 from polars_xxhash import stable_hash
@@ -56,7 +56,7 @@ class DataHolderCfg:
 
 	cluster_col: str = "foldseek_70"
 	cluster_split_cols: List[str] = field(default_factory=lambda: ["foldseek_70", "mmseqs_30"])
-	
+
 	train_val_test_split: List = field(default_factory=lambda: [0.9, 0.05, 0.05])
 	split_limit: DataSplitCfg = field(default_factory=DataSplitCfg)
 
@@ -116,12 +116,12 @@ class DataHolder:
 			cfg.cluster_split_cols,
 		)
 		for mode, mode_idx in [
-			("train", train), 
-			("val", val), 
+			("train", train),
+			("val", val),
 			("test", test),
 		]:
 			logger.info(f"raw {mode} index contains {len(mode_idx)} samples and {len(mode_idx[cfg.cluster_col].unique())} clusters")
-	
+
 		train_index = self._limit_index(train, cfg.split_limit.train, cfg.cluster_col)
 		val_index = self._limit_index(val, cfg.split_limit.val, cfg.cluster_col)
 		test_index = self._limit_index(test, cfg.split_limit.test, cfg.cluster_col)
@@ -140,8 +140,8 @@ class DataHolder:
 		)
 
 		for idx, (mode, mode_samples, mode_clusters) in enumerate([
-			("train", train_samples, train_clusters), 
-			("val", val_samples, val_clusters), 
+			("train", train_samples, train_clusters),
+			("val", val_samples, val_clusters),
 			("test", test_samples, test_clusters),
 		]):
 			logger.info(
@@ -151,33 +151,57 @@ class DataHolder:
 				f"  clusters percentage: {(mode_clusters/tot_clusters)*100:.2f}%\n"
 			)
 
-		# init_data = partial(
-		#     Data,
-		#     data_path=pdb_path,
-		#     clusters_df=train_info,
-		#     num_clusters=samples,
-		#     batch_tokens=cfg.batch_tokens,
-		#     min_seq_size=cfg.min_seq_size,
-		#     max_seq_size=cfg.max_seq_size,
-		#     homo_thresh=cfg.homo_thresh,
-		#     asymmetric_units_only=cfg.asymmetric_units_only,
-		#     buffer_size=cfg.buffer_size,
-		#     seed=cfg.rng_seed,
-		# )  
+		# strip the bucket name from the S3Path for the reader
+		s3_reader = S3Reader(s3_bucket=s3_bucket.bucket)
 
-		# init_loader = partial(
-		#     DataLoader,
-		#     batch_size=None, 
-		#     num_workers=cfg.num_workers, 
-		#     collate_fn=lambda x: x,
-		#     prefetch_factor=cfg.prefetch_factor if cfg.num_workers else None, 
-		#     persistent_workers=cfg.num_workers>0
-		# )
+		self.train_sampler = Sampler(train_index, cfg.cluster_col, cfg.rng_seed, is_val_or_test=False)
+		self.val_sampler = Sampler(val_index, cfg.cluster_col, cfg.rng_seed, is_val_or_test=True)
+		self.test_sampler = Sampler(test_index, cfg.cluster_col, cfg.rng_seed, is_val_or_test=True)
 
-		# # initialize the loaders
-		# self.train = init_loader(init_data(train_info, cfg.num_train))
-		# self.val = init_loader(init_data(val_info, cfg.num_val))
-		# self.test = init_loader(init_data(test_info, cfg.num_test))
+		data_kwargs = dict(
+			s3_reader=s3_reader,
+			batch_tokens=cfg.batch_tokens,
+			buffer_size=cfg.buffer_size,
+			min_seq_size=cfg.min_seq_size,
+			max_seq_size=cfg.max_seq_size,
+			homo_thresh=cfg.homo_thresh,
+			asymmetric_units_only=cfg.asymmetric_units_only,
+		)
+
+		self._train_data = Data(sampler=self.train_sampler, **data_kwargs)
+		self._val_data = Data(sampler=self.val_sampler, **data_kwargs)
+		self._test_data = Data(sampler=self.test_sampler, **data_kwargs)
+
+		init_loader = partial(
+			DataLoader, batch_size=None, num_workers=cfg.num_workers,
+			collate_fn=lambda x: x,
+			prefetch_factor=cfg.prefetch_factor if cfg.num_workers else None,
+			persistent_workers=cfg.num_workers > 0,
+		)
+
+		self.train = init_loader(self._train_data)
+		self.val = init_loader(self._val_data)
+		self.test = init_loader(self._test_data)
+
+	def checkpoint_state(self) -> dict:
+		"""returns {split: (epoch, step)} for saving"""
+		return {
+			"train": (self.train_sampler.epoch, self._train_data.step),
+			"val": (self.val_sampler.epoch, self._val_data.step),
+			"test": (self.test_sampler.epoch, self._test_data.step),
+		}
+
+	def resume_from(self, state: dict) -> None:
+		"""sets sampler.epoch and data.set_resume_step for each split"""
+		for split, sampler, data in [
+			("train", self.train_sampler, self._train_data),
+			("val", self.val_sampler, self._val_data),
+			("test", self.test_sampler, self._test_data),
+		]:
+			if split in state:
+				epoch, step = state[split]
+				sampler.epoch = epoch
+				data.set_resume_step(step)
 
 	def _limit_index(
 		self,
@@ -265,94 +289,95 @@ class DataHolder:
 			.filter(pl.col(_SPLIT) == _TRAIN)
 			.drop(_SPLIT)
 			.collect()
-		)                                                                                                                                        
+		)
 		val_index = (
 			split_index.lazy()
 			.filter(pl.col(_SPLIT) == _VAL)
 			.drop(_SPLIT)
 			.collect()
-		)           
+		)
 		test_index = (
 			split_index.lazy()
 			.filter(pl.col(_SPLIT) == _TEST)
 			.drop(_SPLIT)
 			.collect()
-		)         
+		)
 		return train_index, val_index, test_index
+
 
 class Data(IterableDataset):
 	def __init__(
 		self,
-		data_path: Path,
-		clusters_df: pd.DataFrame,
-		num_clusters: int = -1,
-		batch_tokens: int = 16384,
-		min_seq_size: int = 16,
-		max_seq_size: int = 16384,
-		homo_thresh: float = 0.70,
-		asymmetric_units_only: bool = False,
-		buffer_size: int = 32,
-		seed: int = 42,
-		epoch: Any = None,
+		sampler: Sampler,
+		s3_reader: S3Reader,
+		batch_tokens: int,
+		buffer_size: int,
+		min_seq_size: int,
+		max_seq_size: int,
+		homo_thresh: float,
+		asymmetric_units_only: bool,
 	) -> None:
-
 		super().__init__()
-
 		assert max_seq_size <= batch_tokens, f"max_seq_size ({max_seq_size}) must be <= batch_tokens ({batch_tokens})"
 
-		# keep a cache of pdbs
-		self._pdb_cache = PDBCache(PDBCacheCfg(
-			pdb_path=data_path,
-			min_seq_size=min_seq_size,
-			max_seq_size=max_seq_size,
-			homo_thresh=homo_thresh,
-			asymmetric_units_only=asymmetric_units_only
-		))
+		self._sampler = sampler
+		self._s3_reader = s3_reader
+		self._batch_tokens = batch_tokens
+		self._buffer_size = buffer_size
+		self._min_seq_size = min_seq_size
+		self._max_seq_size = max_seq_size
+		self._homo_thresh = homo_thresh
+		self._asymmetric_units_only = asymmetric_units_only
+		self._resume_step = 0
+		self._step = 0
 
-		# for deterministic and UNIQUE sampling
-		self._sampler = Sampler(clusters_df, SamplerCfg(
-			num_clusters=num_clusters,
-			seed=seed
-		))
+	def set_resume_step(self, step: int) -> None:
+		self._resume_step = step
 
-		# for batch building
-		self._batch_builder_config = BatchBuilderCfg(
-			batch_tokens=batch_tokens,
-			buffer_size=buffer_size
-		)
-
-	def _get_asmb(self, row: pd.Series) -> Optional[Assembly]:
-
-		# get pdb and chain name
-		pdb, chain = row.CHAINID.split("_")
-
-		# get the data corresponding to this pdb
-		pdb_data = self._pdb_cache.get_pdb(pdb)
-
-		# sample an assembly containing this chain
-		asmb = pdb_data.sample_asmb(chain)
-
-		return asmb
+	@property
+	def step(self) -> int:
+		return self._step
 
 	def __iter__(self) -> Generator[DataBatch]:
+		worker_info = get_worker_info()
+		if worker_info is None:
+			worker_id, num_workers = 0, 1
+		else:
+			worker_id, num_workers = worker_info.id, worker_info.num_workers
 
-		# sample rows from the df
-		sampled_rows = self._sampler.sample_rows()
+		read_groups = self._sampler.sample(num_workers, worker_id)
+		batch_builder = BatchBuilder(self._batch_tokens, self._buffer_size)
 
-		# init the batch builder
-		batch_builder = BatchBuilder(self._batch_builder_config)
+		logger.info(f"worker {worker_id}: starting epoch with {len(read_groups)} read groups")
 
-		# iterate through the sampled chains
-		for _, row in sampled_rows.iterrows():
+		for step, group in enumerate(read_groups):
+			# checkpoint recovery: skip already-processed groups
+			if step < self._resume_step:
+				continue
 
-			# add the sample, only yields if batch is ready
-			sample = self._get_asmb(row)
-			if sample is not None:
-				yield from batch_builder.add_sample(sample)
+			self._step = step
+			pdb_results = self._s3_reader.read_group(group)
 
-		# drain the buffer and yield last batches
+			# deduplicate blobs by offset, construct PDBData once per unique blob
+			seen_offsets: dict[int, PDBData] = {}
+			for entry, pdb_dict in pdb_results:
+				if entry.offset not in seen_offsets:
+					seen_offsets[entry.offset] = PDBData(
+						pdb_dict,
+						min_seq_size=self._min_seq_size,
+						max_seq_size=self._max_seq_size,
+						homo_thresh=self._homo_thresh,
+						asymmetric_units_only=self._asymmetric_units_only,
+					)
+
+				pdb_data = seen_offsets[entry.offset]
+				asmb = pdb_data.sample_asmb(entry.chain)
+				if asmb is not None:
+					yield from batch_builder.add_sample(asmb)
+
 		yield from batch_builder.drain_buffer()
-
+		# reset resume step after full epoch
+		self._resume_step = 0
 
 	def __len__(self) -> int:
 		return len(self._sampler)
