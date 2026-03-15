@@ -356,7 +356,11 @@ class Data(IterableDataset):
 				continue
 
 			self._step = step
-			pdb_results = self._s3_reader.read_group(group)
+			try:
+				pdb_results = self._s3_reader.read_group(group)
+			except Exception as exc:
+				logger.warning("failed to read group shard=%s: %s", group.shard_id, exc)
+				continue
 
 			# deduplicate blobs by offset, construct PDBData once per unique blob
 			seen_offsets: dict[int, PDBData] = {}
@@ -372,8 +376,10 @@ class Data(IterableDataset):
 
 				pdb_data = seen_offsets[entry.offset]
 				asmb = pdb_data.sample_asmb(entry.chain)
-				if asmb is not None:
-					yield from batch_builder.add_sample(asmb)
+				if asmb is None:
+					logger.warning("sample_asmb returned None for %s chain %s, skipping", entry.pdb, entry.chain)
+					continue
+				yield from batch_builder.add_sample(asmb)
 
 		yield from batch_builder.drain_buffer()
 		# reset resume step after full epoch

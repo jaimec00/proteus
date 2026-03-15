@@ -158,6 +158,7 @@ class PDBData:
 		chains_data = self._pdb_dict[ProteinKey.CHAINS]
 
 		if chain not in chains_data:
+			logger.warning("chain %s not found in protein, skipping", chain)
 			return None
 
 		# find assemblies containing this chain
@@ -206,6 +207,7 @@ class PDBData:
 			chain_info.append((self._chain_to_idx[asmb_chain], mask.shape[0]))
 
 		if not labels_list:
+			logger.warning("no valid chain data for chain %s (asmb_id=%d), skipping", chain, asmb_id)
 			return None
 
 		labels = np.concatenate(labels_list, axis=0)
@@ -336,6 +338,8 @@ class BatchBuilder:
 		data_batch = DataBatch(self._cur_batch)
 		if not data_batch.is_empty:
 			yield data_batch
+		else:
+			logger.warning("batch builder produced an empty data batch, skipping")
 
 	def _add_buffer(self, asmb: Assembly) -> None:
 		insort(self._buffer, asmb, key=len)
@@ -388,6 +392,7 @@ class DataBatch:
 
 		self.is_empty = not seq_lens
 		if self.is_empty:
+			logger.warning("all %d samples in batch failed construction, batch is empty", len(batch_list))
 			return
 
 		self.sample_idx = torch.cat([torch.full((i,), idx) for idx, i in enumerate(seq_lens)], dim=0)
@@ -489,6 +494,7 @@ class Assembly:
 		)
 
 		if result["labels"].size(0) < self._min_seq_size:
+			logger.warning("sample below min_seq_size (%d < %d), skipping", result["labels"].size(0), self._min_seq_size)
 			return None
 
 		return result
