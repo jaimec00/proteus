@@ -2,8 +2,7 @@
 
 ## What to Test
 
-- test public APIs only
-- if it's exposed to the user, it needs a test
+- complex, non-trivial logic, and the tests should test this, not work around it
 
 ## Test Markers
 
