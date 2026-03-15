@@ -67,3 +67,4 @@ typically use `cpu` env unless `gpu` is necessary
 
 - branch naming: `jaime/{feature,fix,debug,chore,etc}/<descriptive-lowercase-name>`
 - PR titles: casual lowercase
+- when commiting changes you made, try to commit in logical groups, typically don't commit unrelated stuff together
