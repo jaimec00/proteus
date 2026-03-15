@@ -1,13 +1,13 @@
-from proteus.data.data_loader import DataHolderCfg
+from proteus.data.data_loader import DataHolderCfg, DataSplitCfg
 from hydra.core.config_store import ConfigStore
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
 
 @dataclass
 class DefaultData(DataHolderCfg):
     data_path: str = "/home/ubuntu/proteinDiffVirgina/data/pdb_2021aug02"
-    num_train: int = -1
-    num_val: int = -1
-    num_test: int = -1
+    cluster_split_cols: List[str] = field(default_factory=lambda: ["foldseek_70", "mmseqs_30"])
+    split_limit: DataSplitCfg = field(default_factory=DataSplitCfg)
     batch_tokens: int = 65536
     min_seq_size: int = 16
     max_seq_size: int = 512

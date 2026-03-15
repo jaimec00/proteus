@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from hydra.core.config_store import ConfigStore
+from omegaconf import MISSING
 import hydra
 
 from proteus.data.downloads.proteus_dataset.conf import register_download_configs, DataPipelineBaseCfg
@@ -7,13 +8,13 @@ from proteus.data.downloads.proteus_dataset.data_pipeline import DataPipeline
 
 defaults = [
 	"_self_",
-	{"experimental_dl": "default"},
-	{"foldseek": "default"},
+	{"cluster_methods": "default"},
+	{"download_methods": "default"},
 ]
 
 @dataclass
 class DataPipelineCfg(DataPipelineBaseCfg):
-	defaults: list = field(default_factory=lambda: defaults) 
+	defaults: list = field(default_factory=lambda: defaults)
 	s3_path: str = "s3://proteus-data-bucket"
 	local_path: str = "/home/ubuntu/proteus/data/tmp"
 
