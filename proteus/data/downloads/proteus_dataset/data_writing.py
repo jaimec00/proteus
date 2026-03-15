@@ -136,6 +136,12 @@ def _serialize_pdb_blob(pdb_id: str, data: Dict, zstd_level: int = 10) -> bytes:
 		arrays[f"{chain_id}/{ChainKey.OCCUPANCY}"] = chain_data[ChainKey.OCCUPANCY]
 		arrays[f"{chain_id}/{ChainKey.SEQUENCE}"] = np.array(chain_data[ChainKey.SEQUENCE])
 
+	# chain-to-chain similarity arrays
+	if ProteinKey.CHAIN_TM_SCORES in data:
+		arrays[ProteinKey.CHAIN_TM_SCORES] = data[ProteinKey.CHAIN_TM_SCORES]
+	if ProteinKey.CHAIN_SEQ_IDENTITY in data:
+		arrays[ProteinKey.CHAIN_SEQ_IDENTITY] = data[ProteinKey.CHAIN_SEQ_IDENTITY]
+
 	meta = {
 		ProteinKey.RESOLUTION: data[ProteinKey.RESOLUTION],
 		ProteinKey.METHOD: data[ProteinKey.METHOD],
@@ -180,7 +186,7 @@ def _deserialize_pdb_blob(blob: bytes) -> Dict:
 		for a in meta[ProteinKey.ASSEMBLIES]
 	]
 
-	return {
+	result = {
 		ProteinKey.CHAINS: chains,
 		ProteinKey.ASSEMBLIES: assemblies,
 		ProteinKey.RESOLUTION: meta[ProteinKey.RESOLUTION],
@@ -190,3 +196,10 @@ def _deserialize_pdb_blob(blob: bytes) -> Dict:
 		ProteinKey.MEAN_PLDDT: meta[ProteinKey.MEAN_PLDDT],
 		ProteinKey.PTM: meta[ProteinKey.PTM],
 	}
+
+	if ProteinKey.CHAIN_TM_SCORES in npz:
+		result[ProteinKey.CHAIN_TM_SCORES] = npz[ProteinKey.CHAIN_TM_SCORES]
+	if ProteinKey.CHAIN_SEQ_IDENTITY in npz:
+		result[ProteinKey.CHAIN_SEQ_IDENTITY] = npz[ProteinKey.CHAIN_SEQ_IDENTITY]
+
+	return result

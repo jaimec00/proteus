@@ -66,6 +66,8 @@ class ProteinKey(enum.StrEnum):
 	SOURCE = enum.auto()
 	MEAN_PLDDT = enum.auto()
 	PTM = enum.auto()
+	CHAIN_TM_SCORES = enum.auto()
+	CHAIN_SEQ_IDENTITY = enum.auto()
 
 
 class NpzKey(enum.StrEnum):

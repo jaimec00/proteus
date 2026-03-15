@@ -37,7 +37,7 @@ pip = "*"
 numpy = "*"
 pandas = "*"
 pathlib = "*"
-biopython = "1.84.*"
+tmtools = "*"
 tqdm = "*"
 einops = "*"
 omegaconf = "*"
@@ -67,6 +67,7 @@ polars = "1.38.*" # pinned — polars_xxhash whl must match
 proteus = { path = ".", editable = true }
 polars_xxhash = { url = "https://github.com/jaimec00/polars-xxhash/releases/download/v0.1.0/polars_xxhash-0.1.0-1_polars_1_38-cp312-abi3-manylinux_2_28_x86_64.whl" }
 aioresponses = "*"
+parasail = "*"
 
 [feature.cpu]
 

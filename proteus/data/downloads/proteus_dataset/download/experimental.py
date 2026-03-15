@@ -21,7 +21,7 @@ from proteus.data.data_constants import IndexCol, DataSource, ChainKey, ProteinK
 from proteus.data.downloads.proteus_dataset.conf.download import ExperimentalDataDownloadCfg
 from proteus.data.downloads.proteus_dataset.download.base import DownloadMethodBase
 from proteus.data.downloads.proteus_dataset.data_writing import ShardWriter, _serialize_pdb_blob
-from proteus.data.downloads.proteus_dataset.data_parsing import _parse_mmcif
+from proteus.data.downloads.proteus_dataset.data_parsing import _parse_mmcif, compute_chain_similarities
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +186,12 @@ class ExperimentalDataDownload(DownloadMethodBase):
 				fasta_dir.mkdir(parents=True, exist_ok=True)
 				fasta_path = fasta_dir / f"{pdb_id}_{chain_id}.fasta"
 				fasta_path.write_text(f">{pdb_id}_{chain_id}\n{chain_data[ChainKey.SEQUENCE]}\n")
+
+		# compute chain-to-chain similarities
+		chain_ids = list(data[ProteinKey.CHAINS].keys())
+		tm_scores, seq_identity = compute_chain_similarities(data[ProteinKey.CHAINS], chain_ids)
+		data[ProteinKey.CHAIN_TM_SCORES] = tm_scores
+		data[ProteinKey.CHAIN_SEQ_IDENTITY] = seq_identity
 
 		# pack into blob and add to shard
 		blob = _serialize_pdb_blob(pdb_id, data, self.zstd_level)

@@ -21,6 +21,12 @@ class TestSerializeDeserialize:
 
 	def test_roundtrip(self, protein_dict_builder):
 		data = protein_dict_builder(chains=[("A", "ACDEFG"), ("B", "GGGG")])
+
+		# add chain similarity arrays
+		C = len(data[ProteinKey.CHAINS])
+		data[ProteinKey.CHAIN_TM_SCORES] = np.eye(C, dtype=np.float32)
+		data[ProteinKey.CHAIN_SEQ_IDENTITY] = np.eye(C, dtype=np.float32)
+
 		blob = _serialize_pdb_blob("1abc", data)
 		restored = _deserialize_pdb_blob(blob)
 
@@ -41,6 +47,10 @@ class TestSerializeDeserialize:
 			assert rest[ChainKey.SEQUENCE] == orig[ChainKey.SEQUENCE]
 			np.testing.assert_allclose(rest[ChainKey.COORDS], orig[ChainKey.COORDS], atol=1e-5)
 			np.testing.assert_array_equal(rest[ChainKey.ATOM_MASK], orig[ChainKey.ATOM_MASK])
+
+		# chain similarity arrays roundtrip
+		np.testing.assert_allclose(restored[ProteinKey.CHAIN_TM_SCORES], data[ProteinKey.CHAIN_TM_SCORES])
+		np.testing.assert_allclose(restored[ProteinKey.CHAIN_SEQ_IDENTITY], data[ProteinKey.CHAIN_SEQ_IDENTITY])
 
 	def test_roundtrip_with_assemblies(self, protein_dict_builder):
 		data = protein_dict_builder(chains=[("A", "ACDEF"), ("B", "GGGGG")])

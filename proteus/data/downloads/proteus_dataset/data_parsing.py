@@ -1,6 +1,9 @@
 import logging
+
 import numpy as np
 import gemmi
+import tmtools
+import parasail
 
 from proteus.types import Dict, List
 from proteus.static.constants import resname_2_one, noncanonical_parent, atoms as atom14_order
@@ -157,6 +160,53 @@ def _parse_mmcif(
 		ProteinKey.MEAN_PLDDT: float('nan'),
 		ProteinKey.PTM: float('nan'),
 	}
+
+def compute_chain_similarities(
+	chains_data: dict, chain_ids: list[str],
+	gap_open: int = 10, gap_extend: int = 1,
+) -> tuple[np.ndarray, np.ndarray]:
+	"""compute pairwise chain TM-scores and sequence identity.
+
+	returns (tm_scores, seq_identity) both (C, C) float32 arrays
+	where C = len(chain_ids). array index order matches chain_ids.
+	"""
+	C = len(chain_ids)
+	tm_scores = np.eye(C, dtype=np.float32)
+	seq_identity = np.eye(C, dtype=np.float32)
+
+	if C == 1:
+		return tm_scores, seq_identity
+
+	# extract CA coords and sequences per chain
+	ca_coords = []
+	sequences = []
+	for cid in chain_ids:
+		chain = chains_data[cid]
+		coords = chain[ChainKey.COORDS]      # (L, 14, 3)
+		mask = chain[ChainKey.ATOM_MASK]      # (L, 14)
+		# CA is atom index 1
+		ca_mask = mask[:, 1]
+		ca_xyz = coords[ca_mask, 1, :]
+		ca_coords.append(ca_xyz)
+		sequences.append(chain[ChainKey.SEQUENCE])
+
+	matrix = parasail.blosum62
+
+	for i in range(C):
+		for j in range(i + 1, C):
+			# tm-score (asymmetric — normalized by each chain's length)
+			result = tmtools.tm_align(ca_coords[i], ca_coords[j], sequences[i], sequences[j])
+			tm_scores[i, j] = result.tm_norm_chain1
+			tm_scores[j, i] = result.tm_norm_chain2
+
+			# sequence identity via parasail global alignment
+			res = parasail.nw_stats_striped_16(sequences[i], sequences[j], gap_open, gap_extend, matrix)
+			max_len = max(len(sequences[i]), len(sequences[j]))
+			seq_identity[i, j] = res.similar / max_len
+			seq_identity[j, i] = seq_identity[i, j]
+
+	return tm_scores, seq_identity
+
 
 def _best_atom(res, atom_name: str):
 	'''find the atom with the highest occupancy'''
