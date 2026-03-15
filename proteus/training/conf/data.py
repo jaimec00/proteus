@@ -1,4 +1,4 @@
-from proteus.data.data_loader import DataHolderCfg, DataSplitCfg
+from proteus.data.data_loader import DataHolderCfg, DataFilterCfg, DataSplitCfg
 from hydra.core.config_store import ConfigStore
 from dataclasses import dataclass, field
 from typing import List
@@ -11,7 +11,7 @@ class DefaultData(DataHolderCfg):
     batch_tokens: int = 65536
     min_seq_size: int = 16
     max_seq_size: int = 512
-    max_resolution: float = 3.5
+    filters: DataFilterCfg = field(default_factory=DataFilterCfg)
     homo_thresh: float = 0.7
     asymmetric_units_only: bool = False
     num_workers: int = 16
