@@ -4,17 +4,24 @@ import subprocess
 from pathlib import Path
 
 from proteus.types import Dict
-from proteus.data.downloads.proteus_dataset.conf.foldseek import FoldSeekCfg
+from proteus.data.data_constants import ClusteringMethod, ClusterInputType
+from proteus.data.downloads.proteus_dataset.conf.cluster import FoldSeekCfg
+from proteus.data.downloads.proteus_dataset.cluster.base import ClusterMethodBase
 
 
-class FoldSeek:
+class FoldSeek(ClusterMethodBase):
+	method = ClusteringMethod.FOLDSEEK
+	required_inputs = {ClusterInputType.MMCIF}
+
 	def __init__(self, cfg: FoldSeekCfg):
 		self.input_path = Path(cfg.input_path)
 		self.db_path = Path(cfg.db_path)
 		self.raw_db_path = self.db_path / "raw_db"
-		self.cluster_db_path = self.db_path / "cluster_db"
-		self.cluster_tsv_path = self.db_path / "clusters.tsv"
 		self.tmp_dir = self.db_path / "tmp"
+
+		self.tmscore_thresholds = cfg.tmscore_thresholds
+		assert all(round(t, 2) == t for t in self.tmscore_thresholds), \
+			"tmscore thresholds must have at most 2 decimal places"
 
 		# shared
 		self.verbosity = str(cfg.verbosity)
@@ -26,7 +33,6 @@ class FoldSeek:
 		self.chain_name_mode = str(cfg.chain_name_mode)
 
 		# clustering
-		self.tmscore_threshold = str(cfg.tmscore_threshold)
 		self.tmscore_threshold_mode = str(cfg.tmscore_threshold_mode)
 		self.lddt_threshold = str(cfg.lddt_threshold)
 		self.coverage = str(cfg.coverage)
@@ -41,6 +47,22 @@ class FoldSeek:
 		self.split_memory_limit = cfg.split_memory_limit
 		self.cluster_steps = str(cfg.cluster_steps)
 		self.cluster_reassign = str(int(cfg.cluster_reassign))
+
+	@property
+	def thresholds(self) -> list[float]:
+		return self.tmscore_thresholds
+
+	def cluster_db_path(self, threshold: float) -> Path:
+		return self.db_path / f"cluster_db_{threshold}"
+
+	def cluster_tsv_path(self, threshold: float) -> Path:
+		return self.db_path / f"clusters_{threshold}.tsv"
+
+	def has_raw_db(self) -> bool:
+		return any(self.db_path.glob(self.raw_db_path.name + "*"))
+
+	def has_cluster_db(self, threshold: float) -> bool:
+		return any(self.db_path.glob(self.cluster_db_path(threshold).name + "*"))
 
 	def create_db(self):
 		self.db_path.mkdir(parents=True, exist_ok=True)
@@ -58,15 +80,12 @@ class FoldSeek:
 		]
 
 		db_output = subprocess.run(cmd)
-
-		# delete the raw cifs after we create the db
 		db_output.check_returncode()
-		shutil.rmtree(self.input_path)
 
-	def run_cluster(self):
-		"""run foldseek cluster, clean up tmp dir. does not parse results."""
+	def run_cluster(self, threshold: float):
+		"""run foldseek cluster for a single threshold. does not parse results."""
 		raw_db = str(self.raw_db_path)
-		cluster_db = str(self.cluster_db_path)
+		cluster_db = str(self.cluster_db_path(threshold))
 		tmp_dir = str(self.tmp_dir)
 
 		cmd = [
@@ -74,7 +93,7 @@ class FoldSeek:
 			raw_db, cluster_db, tmp_dir,
 			"--alignment-type", "0",                    # 3Di only (structure, no sequence)
 			"--min-seq-id", "0.0",                      # no sequence identity filter
-			"--tmscore-threshold", self.tmscore_threshold,
+			"--tmscore-threshold", str(threshold),
 			"--tmscore-threshold-mode", self.tmscore_threshold_mode,
 			"--lddt-threshold", self.lddt_threshold,
 			"-c", self.coverage,
@@ -98,11 +117,13 @@ class FoldSeek:
 		if self.tmp_dir.exists():
 			shutil.rmtree(self.tmp_dir)
 
-	def parse_clusters(self) -> Dict[str, str]:
-		"""run createtsv, clean up db files, return {chain_id: cluster_representative}.
-		leaves the TSV on disk so it can serve as a resume signal."""
+	def parse_clusters(self, threshold: float) -> Dict[str, str]:
+		"""run createtsv for a single threshold, clean up that threshold's cluster db,
+		return {chain_id: cluster_representative}. leaves the TSV on disk as a resume signal."""
 
-		raw_db, cluster_db, tsv_path = str(self.raw_db_path), str(self.cluster_db_path), str(self.cluster_tsv_path)
+		raw_db = str(self.raw_db_path)
+		cluster_db = str(self.cluster_db_path(threshold))
+		tsv_path = str(self.cluster_tsv_path(threshold))
 
 		result = subprocess.run([
 			"foldseek", "createtsv",
@@ -111,23 +132,28 @@ class FoldSeek:
 		])
 		result.check_returncode()
 
-		# clean up db files now that we have the tsv
-		for f in self.db_path.glob(self.raw_db_path.name + "*"):
-			f.unlink()
-		for f in self.db_path.glob(self.cluster_db_path.name + "*"):
+		# clean up this threshold's cluster db files (not the raw db)
+		for f in self.db_path.glob(self.cluster_db_path(threshold).name + "*"):
 			f.unlink()
 
-		return self.load_clusters()
+		return self.load_clusters(threshold)
 
-	def load_clusters(self) -> Dict[str, str]:
-		"""read existing clusters.tsv into {chain_id: cluster_representative}"""
+	def load_clusters(self, threshold: float) -> Dict[str, str]:
+		"""read existing clusters TSV into {chain_id: cluster_representative}"""
 		clusters = {}
-		for line in self.cluster_tsv_path.read_text().splitlines():
+		for line in self.cluster_tsv_path(threshold).read_text().splitlines():
 			rep, member = line.split("\t")
 			clusters[member] = rep
 		return clusters
 
-	def cleanup_tsv(self):
-		"""remove the clusters TSV after index has been safely uploaded"""
-		if self.cluster_tsv_path.exists():
-			self.cluster_tsv_path.unlink()
+	def cleanup_raw_db(self):
+		"""remove raw foldseek db files after all thresholds are done"""
+		for f in self.db_path.glob(self.raw_db_path.name + "*"):
+			f.unlink()
+
+	def cleanup_tsvs(self):
+		"""remove all cluster TSVs after index has been safely uploaded"""
+		for threshold in self.tmscore_thresholds:
+			tsv = self.cluster_tsv_path(threshold)
+			if tsv.exists():
+				tsv.unlink()

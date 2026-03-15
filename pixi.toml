@@ -35,9 +35,8 @@ platforms = ["linux-64"]
 pytorch = ">=2.9,<2.10"
 pip = "*"
 numpy = "*"
-pandas = "*"
 pathlib = "*"
-biopython = "1.84.*"
+tmtools = "*"
 tqdm = "*"
 einops = "*"
 omegaconf = "*"
@@ -53,13 +52,21 @@ awscrt = "*"
 cloudpathlib = "*"
 gemmi = "*"
 zstandard = "*"
+moto = "*"
+pytest-asyncio = "*"
 foldseek = "*"
+mmseqs2 = "*"
 awscli = "*"
 gh = "*"
 ipykernel = "*"
+ipywidgets = "*"
+polars = "1.38.*" # pinned — polars_xxhash whl must match
+aioresponses = "*"
 
 [pypi-dependencies]
 proteus = { path = ".", editable = true }
+polars_xxhash = { url = "https://github.com/jaimec00/polars-xxhash/releases/download/v0.1.0/polars_xxhash-0.1.0-1_polars_1_38-cp312-abi3-manylinux_2_28_x86_64.whl" }
+parasail = "*"
 
 [feature.cpu]
 

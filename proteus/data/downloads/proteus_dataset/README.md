@@ -18,12 +18,19 @@ per chain (keyed by `{chain_id}/` prefix in npz):
 - coords: L,14,3 — atom14 3d coords
 - sequence: string of one letter AA identifiers
 - atom_mask: L,14 boolean mask of valid atom coords
-- bfactor: L, (for experimental structures)
+- bfactor: L,14 (for experimental structures)
+- plddt: L (for predicted structures)
+- occupancy: L,14
 
 per pdb (in `_meta` json entry):
-- chains: list of chain IDs
+- chains: ordered list of chain IDs
 - resolution, method, deposit_date, source
-- assemblies: list of {chains, transforms (Nx4x4 homogeneous)}
+- mean_plddt, ptm (quality scores, nan for experimental)
+- assemblies: list of {chains, asmb_xforms (Nx4x4 homogeneous)}
+
+per pdb (as numpy arrays in the npz, optional):
+- chain_tm_scores: NxN float32 matrix of pairwise chain TM-scores
+- chain_seq_identity: NxN float32 matrix of pairwise chain sequence identity
 
 full-backbone mmCIF files are written locally during download (gzip compressed,
 as foldseek can work with this directly), then deleted after clustering.
@@ -32,12 +39,13 @@ as foldseek can work with this directly), then deleted after clustering.
 
 parquet file, small enough to fit in memory on every process. one row per chain:
 - pdb, chain, source, shard_id, offset, size (bytes)
-- cluster_id
 - resolution, method, deposit_date
-- mean_plddt, ptm (for predicted sources, TODO)
+- mean_plddt, ptm
+- dynamic cluster columns (e.g. `foldseek_70`, `mmseqs_30`) — one column per
+  clustering method and threshold combination, named `{method}_{threshold}`
 
 built incrementally during shard creation, updated in bulk after clustering
-with the cluster_id column. uploaded to s3 once finalized.
+with the cluster columns. uploaded to s3 once finalized.
 
 splitting is not recorded in the index — it is determined at training time
 to allow flexibility across experiments (see train/val/test split section).
@@ -87,7 +95,11 @@ after the full pipeline completes successfully (index uploaded to s3), the
 checkpoint and cluster TSV are deleted. absence of both on the next run
 means start from scratch.
 
-### foldseek clustering (global, sequential)
+### clustering (global, sequential)
+
+supports both foldseek (structural) and mmseqs (sequence) clustering at
+configurable thresholds. multiple methods can be run, each producing a
+separate column in the index (e.g. `foldseek_70`, `mmseqs_30`).
 
 the foldseek stage is broken into granular steps, each leaving artifacts
 on disk so the pipeline can resume from whichever step completed last:
@@ -95,30 +107,32 @@ on disk so the pipeline can resume from whichever step completed last:
 1. `create_db` — build foldseek db from local backbone CIFs, then delete CIFs
 2. `run_cluster` — run foldseek cluster, clean up tmp dir
 3. `parse_clusters` — run createtsv, delete db files, leave `clusters.tsv`
-4. index is updated with cluster_id column and uploaded to s3
+4. index is updated with the cluster column and uploaded to s3
 5. `cleanup_tsv` — delete clusters.tsv only after s3 upload succeeds
 
 on resume, the pipeline checks state in priority order:
-- `clusters.tsv` exists → skip all foldseek, just read the TSV
+- `clusters.tsv` exists → skip all clustering, just read the TSV
 - cluster db files exist → skip createdb and cluster, run createtsv
 - raw db files exist → skip createdb, run cluster + createtsv
 - nothing exists → full pipeline from createdb
 
-clustering is used only for train/val/test splitting, not for shard layout
-or training-time sampling.
+clustering is used for train/val/test splitting and for per-epoch sampling
+(one chain per cluster per epoch).
 
 ### train/val/test split
 
 splitting is done at training time, not baked into the index. this allows
-flexibility to experiment with different clustering definitions (e.g. 0.5
+flexibility to experiment with different clustering definitions (e.g. 0.7
 structural clustering, 0.3 sequence clustering) and compare them fairly.
 
 at training startup:
-- clusters are randomly sampled for val and test sets using a seed
-- any chains in the train set that appear in either val or test clusters
-  are removed, ensuring no leakage
-- this is done independently for each clustering definition so results
-  are comparable across methods
+- each cluster column is hashed with xxhash using a fixed seed. clusters
+  whose hash falls below a threshold are assigned to test, then val, then
+  train. thresholds are adjusted per-column so the OR-union across all
+  columns approximates the target split ratio
+- any pdb that has chains in both test and non-test is moved entirely to
+  test to prevent leakage. same for val vs train
+- this is deterministic from the seed — no randomness, same split every run
 
 this approach wastes some training data (chains removed to prevent leakage
 across multiple clustering definitions), but is necessary for fair comparison.
@@ -126,8 +140,7 @@ once a clustering method is chosen, the split can be redefined to be less
 strict and recover that data for training, while still ensuring no leakage
 within the chosen definition.
 
-split ratios and which sources are eligible for val/test are configurable.
-evaluation should use experimental structures for ground truth comparison.
+split ratios and which clustering columns to split on are configurable.
 
 ## shard format
 
@@ -149,39 +162,68 @@ evaluation should use experimental structures for ground truth comparison.
 
 a sample is a chain, presented in its biounit context when available.
 
-all workers start with the same seed and sample one chain per cluster,
-so they agree on which chains form the training set for the epoch. the
-seed changes per epoch to rotate which chain represents each cluster.
-effective dataset size per epoch = number of clusters.
+each epoch, one chain is sampled per cluster (deterministic from seed +
+epoch number). the seed rotates per epoch for training; val/test use a
+fixed seed for reproducibility. effective dataset size per epoch = number
+of clusters.
 
-### byte-range reads from s3
+### read planning (S3Orchestrator)
 
-once the per-epoch chain set is determined, each worker uses the index
-to compute the byte ranges needed from each shard. depending on how
-well-coalesced the needed ranges are within a shard, reads are either
-issued as individual byte-range requests or as a single contiguous read
-spanning from the first needed pdb to the last.
+once the per-epoch chain set is determined, the sampled rows are grouped
+by shard_id and sorted by byte offset. entries whose gaps are smaller
+than a configurable threshold (default 64KB) are coalesced into a single
+ReadGroup, minimizing the number of S3 range requests. the resulting
+ReadGroups are deterministically shuffled and round-robin partitioned
+across workers.
 
-work is partitioned across workers at the pdb level — no pdb is split
-across workers, and each pdb is read by exactly one worker. partitioning
-is deterministic from the seed so no inter-worker communication is needed.
+### s3 streaming (S3Reader)
 
-### batching with packed sequences
+each worker processes its assigned ReadGroups sequentially. for each
+group, a single S3 byte-range GET fetches the coalesced range, then
+individual blob slices are extracted and deserialized (zstd decompress +
+numpy load). blobs shared by multiple chains (same pdb, same offset) are
+deduplicated so each blob is deserialized at most once per group.
 
-- each worker maintains a token budget per batch (e.g. max_tokens = 4096)
-- a buffer of yielded samples is accumulated; once the budget is met,
-  the batch is returned
-- packing is greedy, first-come-first-served from the read stream
+boto3 clients are lazily initialized per worker to avoid fork-safety
+issues with DataLoader's multiprocessing.
+
+### assembly sampling (PDBData)
+
+for each sampled chain, PDBData picks a random assembly containing that
+chain (or uses the chain alone with an identity transform if no assembly
+includes it). chains within the assembly are shuffled with the target
+chain first (so it survives cropping). per-chain coords, atom_mask, and
+sequence labels are concatenated. homologous chains are identified from
+the chain_tm_scores matrix. the assembly transform is applied during
+construct() to produce symmetry copies.
+
+### batching with packed sequences (BatchBuilder)
+
+each worker maintains a sorted buffer of assemblies. when the buffer is
+full (configurable buffer_size), the largest assembly that fits the
+remaining token budget is popped and added to the current batch. when no
+more assemblies fit, the batch is yielded and a new one starts. at epoch
+end, the buffer is drained to yield any remaining batches.
+
+### checkpoint / resume
+
+the training loop can save and restore dataloader state:
+- `DataHolder.checkpoint_state()` returns `{split: (epoch, step)}` for
+  each split (train/val/test)
+- `DataHolder.resume_from(state)` sets the sampler epoch and tells Data
+  to skip the first N read groups, resuming from where it left off
+
+the read plan is regenerated deterministically from (seed, epoch), so
+only the epoch and step index are needed to reconstruct full state.
 
 ### val/test evaluation
 
-val/test chains are determined at training startup by cluster sampling
-(see train/val/test split section). workers read only the needed byte
-ranges from their source shards using the index.
+val/test use a fixed seed so the same chains are evaluated every time.
+workers read only the needed byte ranges from their assigned shards.
 
 ## why this works
 
-- crash-resumable — checkpoint after each shard upload, foldseek resumes from last completed step
+- crash-resumable — checkpoint after each shard upload, clustering resumes from last completed step
 - no staging, no re-sharding — each pdb written to s3 exactly once
 - source-homogeneous shards for independent updates and data ratio experiments
 - cluster-level chain sampling gives good diversity per epoch
@@ -190,3 +232,4 @@ ranges from their source shards using the index.
 - same code for single-GPU num_workers and multi-GPU DDP
 - biounits constructed from single pdb blobs, no cross-shard dependencies
 - splitting at training time allows flexible experimentation with clustering methods
+- deterministic from seed — full reproducibility, checkpoint/resume with just (epoch, step)

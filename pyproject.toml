@@ -11,3 +11,9 @@ requires-python = ">=3.8"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["proteus*"]
+
+[tool.pytest.ini_options]
+markers = [
+	"cpu: test runs on CPU only",
+	"gpu: test requires a GPU",
+]
