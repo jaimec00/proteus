@@ -17,16 +17,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from proteus.types import Dict, List, Tuple, Set
 from proteus.utils.s3_utils import REGION
-from proteus.data.data_constants import IndexCol, DataSource, ChainKey, ProteinKey, ExpMethods
-from proteus.data.downloads.proteus_dataset.conf.experimental_download import ExperimentalDataDownloadCfg
+from proteus.data.data_constants import IndexCol, DataSource, ChainKey, ProteinKey, ExpMethods, ClusterInputType
+from proteus.data.downloads.proteus_dataset.conf.download import ExperimentalDataDownloadCfg
+from proteus.data.downloads.proteus_dataset.download.base import DownloadMethodBase
 from proteus.data.downloads.proteus_dataset.data_writing import ShardWriter, _serialize_pdb_blob
 from proteus.data.downloads.proteus_dataset.data_parsing import _parse_mmcif
 
 logger = logging.getLogger(__name__)
 
 
-class ExperimentalDataDownload:
-	def __init__(self, cfg: ExperimentalDataDownloadCfg):
+class ExperimentalDataDownload(DownloadMethodBase):
+	def __init__(self, cfg: ExperimentalDataDownloadCfg, required_inputs: set[ClusterInputType]):
 
 		if cfg.min_chain_length < 4:
 			raise RuntimeError(f"min_chain_length must be >= 4 for foldseek clustering, got {cfg.min_chain_length}")
@@ -50,12 +51,15 @@ class ExperimentalDataDownload:
 		self.local_path = Path(cfg.local_path)
 		self.checkpoint_path = Path(cfg.checkpoint_path)
 
+		# which input files to write during download
+		self.required_inputs = required_inputs
+
 	def download(self):
 
 		# get ids, pdb redo returns all in the db, rcsb returns all with filters
 		pdbredo_ids = self._get_pdbredo_ids()
 		rcsb_ids = self._get_rcsb_ids()
-		
+
 		# filter out pdbs from pdb redo that arent in rcsb set, since rcsb set applied the filter
 		pdbredo_set = pdbredo_ids & rcsb_ids
 
@@ -109,7 +113,7 @@ class ExperimentalDataDownload:
 
 		pbar = tqdm(total=len(remaining), desc="downloading")
 
-		connector = aiohttp.TCPConnector(limit=0, enable_cleanup_closed=True)
+		connector = aiohttp.TCPConnector(limit=0)
 		timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_read=60)
 		self._semaphore = asyncio.Semaphore(self.semaphore_limit)
 		s3_session = aioboto3.Session()
@@ -169,10 +173,19 @@ class ExperimentalDataDownload:
 		if data is None:
 			return None
 
-		# write ca cifs locally for foldseek
+		# write input files for clustering methods that need them
 		for chain_id, chain_data in data[ProteinKey.CHAINS].items():
-			cif_path = self.local_path / f"{pdb_id}_{chain_id}.cif.gz"
-			cif_path.write_bytes(gzip.compress(chain_data[ChainKey.CIF].encode()))
+			if ClusterInputType.MMCIF in self.required_inputs:
+				mmcif_dir = self.local_path / "raw_mmcif"
+				mmcif_dir.mkdir(parents=True, exist_ok=True)
+				cif_path = mmcif_dir / f"{pdb_id}_{chain_id}.cif.gz"
+				cif_path.write_bytes(gzip.compress(chain_data[ChainKey.CIF].encode()))
+
+			if ClusterInputType.FASTA in self.required_inputs:
+				fasta_dir = self.local_path / "raw_fasta"
+				fasta_dir.mkdir(parents=True, exist_ok=True)
+				fasta_path = fasta_dir / f"{pdb_id}_{chain_id}.fasta"
+				fasta_path.write_text(f">{pdb_id}_{chain_id}\n{chain_data[ChainKey.SEQUENCE]}\n")
 
 		# pack into blob and add to shard
 		blob = _serialize_pdb_blob(pdb_id, data, self.zstd_level)

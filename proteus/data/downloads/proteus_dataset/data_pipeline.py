@@ -2,7 +2,9 @@
 entry point for the experimental structure data collection and cleaning pipeline
 '''
 
+import importlib
 import logging
+import shutil
 
 from pathlib import Path
 from cloudpathlib import S3Path
@@ -10,24 +12,47 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from proteus.utils.s3_utils import upload_bytes_to_s3_sync
-from proteus.data.data_constants import DataPath, IndexCol, ClusteringMethod, cluster_col_name
+from proteus.data.data_constants import DataPath, IndexCol, ClusterInputType, cluster_col_name
 from proteus.data.downloads.proteus_dataset.conf.pipeline import DataPipelineBaseCfg
-from proteus.data.downloads.proteus_dataset.download_experimental import ExperimentalDataDownload
-from proteus.data.downloads.proteus_dataset.struct_clust import FoldSeek
+from proteus.data.downloads.proteus_dataset.download.base import DownloadMethodBase
+from proteus.data.downloads.proteus_dataset.cluster.base import ClusterMethodBase
+
+
+def _load_impl_cls(cfg):
+	"""resolve _impl_cls dotted string to the actual class"""
+	module_path, cls_name = cfg._impl_cls.rsplit(".", 1)
+	module = importlib.import_module(module_path)
+	return getattr(module, cls_name)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 class DataPipeline:
 	def __init__(self, cfg: DataPipelineBaseCfg):
-		self.experimental_dl = ExperimentalDataDownload(cfg.experimental_dl)
-		self.foldseek = FoldSeek(cfg.foldseek)
+		# instantiate clustering methods from configs
+		self.cluster_methods: list[ClusterMethodBase] = [
+			_load_impl_cls(method_cfg)(method_cfg) for method_cfg in cfg.cluster_methods
+		]
+		assert len(self.cluster_methods) >= 1, "at least one clustering method required"
+
+		# union of required input types across all methods
+		self.required_inputs: set[ClusterInputType] = set()
+		for m in self.cluster_methods:
+			self.required_inputs |= m.required_inputs
+
+		# instantiate download methods from configs
+		self.download_methods: list[DownloadMethodBase] = [
+			_load_impl_cls(method_cfg)(method_cfg, self.required_inputs) for method_cfg in cfg.download_methods
+		]
+
 		self.s3_path = S3Path(cfg.s3_path)
 		self.local_path = Path(cfg.local_path)
 
 	def download(self):
-		# TODO: add other download sources
-		return self.experimental_dl.download()
+		index_rows = []
+		for method in self.download_methods:
+			index_rows.extend(method.download())
+		return index_rows
 
 	def run(self):
 		index_rows = self.download()
@@ -43,40 +68,42 @@ class DataPipeline:
 		pq.write_table(table, index_path)
 		logger.info(f"saved index with {len(index_rows)} rows to {index_path}")
 
-		# clustering: loop over thresholds, reusing the raw db across all
-		thresholds = self.foldseek.tmscore_thresholds
-		need_raw_db = any(
-			not self.foldseek.cluster_tsv_path(t).exists() for t in thresholds
-		)
+		# phase 1: create all raw DBs that need building
+		for method in self.cluster_methods:
+			need_raw_db = any(not method.cluster_tsv_path(t).exists() for t in method.thresholds)
+			if need_raw_db and not method.has_raw_db():
+				method.create_db()
 
-		if need_raw_db:
-			has_raw_db = any(self.foldseek.db_path.glob(self.foldseek.raw_db_path.name + "*"))
-			if not has_raw_db:
-				self.foldseek.create_db()
+		# phase 2: delete raw input files (all methods have built their DBs)
+		for input_type in self.required_inputs:
+			input_dir = self.local_path / f"raw_{input_type}"
+			if input_dir.exists():
+				shutil.rmtree(input_dir)
 
-		for threshold in thresholds:
-			col_name = cluster_col_name(ClusteringMethod.FOLDSEEK, threshold)
+		# phase 3: cluster per method, per threshold
+		for method in self.cluster_methods:
+			need_raw_db = any(not method.cluster_tsv_path(t).exists() for t in method.thresholds)
 
-			if self.foldseek.cluster_tsv_path(threshold).exists():
-				logger.info(f"found existing {self.foldseek.cluster_tsv_path(threshold).name}, skipping foldseek for threshold {threshold}")
-				clusters = self.foldseek.load_clusters(threshold)
-			else:
-				has_cluster_db = any(self.foldseek.db_path.glob(self.foldseek.cluster_db_path(threshold).name + "*"))
-				if has_cluster_db:
-					logger.info(f"found existing cluster db for threshold {threshold}, skipping cluster step")
+			for threshold in method.thresholds:
+				col_name = cluster_col_name(method.method, threshold)
+
+				if method.cluster_tsv_path(threshold).exists():
+					logger.info(f"found existing {method.cluster_tsv_path(threshold).name}, skipping {method.method} for threshold {threshold}")
+					clusters = method.load_clusters(threshold)
 				else:
-					self.foldseek.run_cluster(threshold)
-				clusters = self.foldseek.parse_clusters(threshold)
+					if not method.has_cluster_db(threshold):
+						method.run_cluster(threshold)
+					clusters = method.parse_clusters(threshold)
 
-			cluster_ids = [
-				clusters.get(f"{pdb}_{chain}", "")
-				for pdb, chain in zip(columns[IndexCol.PDB], columns[IndexCol.CHAIN])
-			]
-			table = table.append_column(col_name, pa.array(cluster_ids))
+				cluster_ids = [
+					clusters.get(f"{pdb}_{chain}", "")
+					for pdb, chain in zip(columns[IndexCol.PDB], columns[IndexCol.CHAIN])
+				]
+				table = table.append_column(col_name, pa.array(cluster_ids))
 
-		# raw db no longer needed after all thresholds
-		if need_raw_db:
-			self.foldseek.cleanup_raw_db()
+			# raw db no longer needed after all thresholds for this method
+			if need_raw_db:
+				method.cleanup_raw_db()
 
 		pq.write_table(table, index_path)
 
@@ -86,7 +113,9 @@ class DataPipeline:
 		logger.info(f"uploaded index to {s3_index_path}")
 
 		# cleanup only after S3 upload succeeds
-		self.foldseek.cleanup_tsvs()
-		if self.experimental_dl.checkpoint_path.exists():
-			self.experimental_dl.checkpoint_path.unlink()
-			logger.info("removed checkpoint file after successful completion")
+		for method in self.cluster_methods:
+			method.cleanup_tsvs()
+		for method in self.download_methods:
+			if method.checkpoint_path.exists():
+				method.checkpoint_path.unlink()
+				logger.info(f"removed checkpoint file {method.checkpoint_path}")

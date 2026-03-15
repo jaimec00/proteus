@@ -4,10 +4,15 @@ import subprocess
 from pathlib import Path
 
 from proteus.types import Dict
-from proteus.data.downloads.proteus_dataset.conf.foldseek import FoldSeekCfg
+from proteus.data.data_constants import ClusteringMethod, ClusterInputType
+from proteus.data.downloads.proteus_dataset.conf.cluster import FoldSeekCfg
+from proteus.data.downloads.proteus_dataset.cluster.base import ClusterMethodBase
 
 
-class FoldSeek:
+class FoldSeek(ClusterMethodBase):
+	method = ClusteringMethod.FOLDSEEK
+	required_inputs = {ClusterInputType.MMCIF}
+
 	def __init__(self, cfg: FoldSeekCfg):
 		self.input_path = Path(cfg.input_path)
 		self.db_path = Path(cfg.db_path)
@@ -43,11 +48,21 @@ class FoldSeek:
 		self.cluster_steps = str(cfg.cluster_steps)
 		self.cluster_reassign = str(int(cfg.cluster_reassign))
 
+	@property
+	def thresholds(self) -> list[float]:
+		return self.tmscore_thresholds
+
 	def cluster_db_path(self, threshold: float) -> Path:
 		return self.db_path / f"cluster_db_{threshold}"
 
 	def cluster_tsv_path(self, threshold: float) -> Path:
 		return self.db_path / f"clusters_{threshold}.tsv"
+
+	def has_raw_db(self) -> bool:
+		return any(self.db_path.glob(self.raw_db_path.name + "*"))
+
+	def has_cluster_db(self, threshold: float) -> bool:
+		return any(self.db_path.glob(self.cluster_db_path(threshold).name + "*"))
 
 	def create_db(self):
 		self.db_path.mkdir(parents=True, exist_ok=True)
@@ -65,10 +80,7 @@ class FoldSeek:
 		]
 
 		db_output = subprocess.run(cmd)
-
-		# delete the raw cifs after we create the db
 		db_output.check_returncode()
-		shutil.rmtree(self.input_path)
 
 	def run_cluster(self, threshold: float):
 		"""run foldseek cluster for a single threshold. does not parse results."""

@@ -1,13 +1,19 @@
 from dataclasses import dataclass, field
 from hydra.core.config_store import ConfigStore
+from omegaconf import MISSING
+
 
 @dataclass
-class FoldSeekCfg:
-	input_path: str = "${..local_path}/raw_cif" # where the raw mmCIF's get stored
-	db_path: str = "${..local_path}/db" # where the foldseek dbs live
-
-	# shared
+class ClusterMethodCfg:
+	input_path: str = MISSING
+	db_path: str = MISSING
 	verbosity: int = 1
+
+
+@dataclass
+class FoldSeekCfg(ClusterMethodCfg):
+	input_path: str = "${...local_path}/raw_mmcif"
+	db_path: str = "${...local_path}/foldseek_db"
 
 	# createdb
 	distance_threshold: float = 8.0
@@ -31,7 +37,28 @@ class FoldSeekCfg:
 	split_memory_limit: str = "0" # max memory per split, e.g. "10G". 0 = all available
 	cluster_steps: int = 3 # cascaded clustering steps
 	cluster_reassign: bool = True
+	_impl_cls: str = "proteus.data.downloads.proteus_dataset.cluster.FoldSeek"
 
-def register_foldseek():
+
+@dataclass
+class MMSeqsCfg(ClusterMethodCfg):
+	input_path: str = "${...local_path}/raw_fasta"
+	db_path: str = "${...local_path}/mmseqs_db"
+
+	seq_id_thresholds: list[float] = field(default_factory=lambda: [0.3])
+	coverage: float = 0.8
+	cov_mode: int = 0 # 0: query+target, 1: target, 2: query
+	cluster_mode: int = 0 # 0: set-cover, 1: connected component, 2/3: greedy by length
+	sensitivity: float = 4.0
+	e_value: float = 0.001
+	max_seqs: int = 20
+	seq_id_mode: int = 0 # 0: alignment length, 1: shorter, 2: longer
+	min_aln_len: int = 0
+	split: int = 0 # 0 = auto split based on available memory
+	split_memory_limit: str = "0" # max memory per split, e.g. "10G". 0 = all available
+	_impl_cls: str = "proteus.data.downloads.proteus_dataset.cluster.MMSeqs"
+
+
+def register_cluster():
 	cs = ConfigStore.instance()
-	cs.store("default", FoldSeekCfg, group="foldseek")
+	cs.store("default", node=[FoldSeekCfg(), MMSeqsCfg()], group="cluster_methods")

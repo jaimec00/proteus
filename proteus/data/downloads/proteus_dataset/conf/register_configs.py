@@ -1,8 +1,8 @@
-from proteus.data.downloads.proteus_dataset.conf.experimental_download import register_experimental_download
-from proteus.data.downloads.proteus_dataset.conf.foldseek import register_foldseek
+from proteus.data.downloads.proteus_dataset.conf.download import register_download
+from proteus.data.downloads.proteus_dataset.conf.cluster import register_cluster
 from proteus.data.downloads.proteus_dataset.conf.hydra import register_hydra
 
 def register_download_configs():
-    register_experimental_download()
-    register_foldseek()
-    register_hydra()
+	register_download()
+	register_cluster()
+	register_hydra()
