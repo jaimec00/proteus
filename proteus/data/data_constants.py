@@ -25,6 +25,12 @@ class DataSource(enum.StrEnum):
 
 class ClusteringMethod(enum.StrEnum):
 	FOLDSEEK = enum.auto()
+	MMSEQS = enum.auto()
+
+
+class ClusterInputType(enum.StrEnum):
+	MMCIF = enum.auto()
+	FASTA = enum.auto()
 
 
 def cluster_col_name(method: ClusteringMethod, threshold: float) -> str:
