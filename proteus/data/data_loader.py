@@ -5,7 +5,7 @@ from __future__ import annotations
 from torch.utils.data import IterableDataset, DataLoader
 import torch
 
-from typing import Generator, Tuple, Optional, Any
+from typing import Generator, Tuple, Optional, Any, List
 from dataclasses import dataclass, field
 from pathlib import Path
 import pandas as pd
@@ -32,6 +32,7 @@ def _validate_cluster_col(cluster_col: str) -> None:
 class DataHolderCfg:
     s3_bucket: S3Path
     cluster_col: str = "foldseek_70"
+    cluster_split_cols: List[str] = field(default_factory=lambda: ["foldseek_70", "mmseqs_30"])
     train_val_test_split: List = field(default_factory=lambda: [0.9, 0.05, 0.05])
 
     batch_tokens: int = 16384
@@ -61,6 +62,11 @@ class DataHolder:
     def __init__(self, cfg: DataHolderCfg) -> None:
 
         _validate_cluster_col(cfg.cluster_col)
+        for col in cfg.cluster_split_cols:
+            _validate_cluster_col(col)
+
+        assert cfg.cluster_col in cfg.cluster_split_cols, \
+            f"cluster_col '{cfg.cluster_col}' must be in cluster_split_cols {cfg.cluster_split_cols}"
 
         # define data path and path to pdbs
         s3_bucket = S3Path(cfg.s3_bucket)
@@ -69,8 +75,12 @@ class DataHolder:
 
         assert cfg.cluster_col in self.raw_index.columns, \
             f"cluster column '{cfg.cluster_col}' not found in index (columns: {self.raw_index.columns})"
+        for col in cfg.cluster_split_cols:
+            assert col in self.raw_index.columns, \
+                f"cluster_split_col '{col}' not found in index (columns: {self.raw_index.columns})"
 
         self.cluster_col = cfg.cluster_col
+        self.cluster_split_cols = cfg.cluster_split_cols
         self.index = self._apply_filter(
             self.raw_index,
             cfg.max_resolution,
@@ -129,36 +139,44 @@ class DataHolder:
         train_val_test_split: List[float],
     ) -> Tuple[pa.Table, pa.Table, pa.Table]:
 
-        # compute thresholds
+        # compute per-column thresholds adjusted for OR-union across N columns
+        # formula: per_col_pct = 1 - (1 - target_pct)^(1/N) so the union ≈ target_pct
         assert sum(train_val_test_split) == 1.0
         _, val_pct, test_pct = train_val_test_split
-        val_pct = val_pct / (1-test_pct)
-        test_thresh = int(test_pct * UINT64)
-        val_thresh = int(val_pct * UINT64)
+        val_pct = val_pct / (1 - test_pct)
+        n_cols = len(self.cluster_split_cols)
+        adj_test_pct = 1 - (1 - test_pct) ** (1 / n_cols)
+        adj_val_pct = 1 - (1 - val_pct) ** (1 / n_cols)
+        test_thresh = int(adj_test_pct * UINT64)
+        val_thresh = int(adj_val_pct * UINT64)
 
-        # tmp stuff
         _IS_TEST, _SPLIT = "_is_test", "_split"
         _TEST, _VAL, _TRAIN = 0, 1, 2
 
-        # hash the cluster column to assign splits
-        cluster_col = self.cluster_col
+        # build OR expressions across all cluster columns
+        is_test_expr = pl.lit(False)
+        for col in self.cluster_split_cols:
+            is_test_expr = is_test_expr | (stable_hash(pl.col(col), seed=TEST_SEED) < test_thresh)
+
+        is_val_expr = pl.lit(False)
+        for col in self.cluster_split_cols:
+            is_val_expr = is_val_expr | (stable_hash(pl.col(col), seed=VAL_SEED) < val_thresh)
+
+        # single lazy chain: assign test → filter pdb leakage → assign split → filter pdb leakage → collect
         split_index = (
             index.lazy()
-            .with_columns(
-                (stable_hash(pl.col(cluster_col), seed=TEST_SEED) < test_thresh)
-                .alias(_IS_TEST)
-            )
-            # remove any chain not in test who have a pdb id which is in test
+            .with_columns(is_test_expr.alias(_IS_TEST))
+            # remove any chain not in test whose pdb id has a chain in test
             .filter(~(~pl.col(_IS_TEST) & pl.col(_IS_TEST).any().over(IndexCol.PDB)))
             .with_columns(
                 pl.when(pl.col(_IS_TEST)).then(_TEST)
-                .when(stable_hash(pl.col(cluster_col), seed=VAL_SEED) < val_thresh).then(_VAL)
+                .when(is_val_expr).then(_VAL)
                 .otherwise(_TRAIN)
                 .alias(_SPLIT)
             )
             # remove any chain in train whose pdb id is in val
             .filter(~((pl.col(_SPLIT) == _TRAIN) & (pl.col(_SPLIT) == _VAL).any().over(IndexCol.PDB)))
-            .drop(_IS_TEST) # remove _is_test
+            .drop(_IS_TEST)
             .collect()
         )
 
