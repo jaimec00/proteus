@@ -12,6 +12,7 @@ class DownloadMethodCfg:
 	shard_size_mb: int = 256
 	zstd_level: int = 10
 	semaphore_limit: int = 32
+	pipeline_concurrency: int = 256
 	chunk_size: int = 1000
 
 
@@ -20,11 +21,13 @@ class ExperimentalDataDownloadCfg(DownloadMethodCfg):
 	# filtering
 	methods: list = field(default_factory=lambda: [ExpMethods.XRAY, ExpMethods.CRYO_EM])
 	max_resolution: float = 3.5
-	max_entries: int = 1024  # -1 = all, testing for now
+	max_entries: int = 32  # -1 = all, testing for now
 	min_chain_length: int = 8 # skip chains shorter than this (foldseek requires >= 4)
+	pipeline_concurrency: int = 256
+	pdbredo_cache_ttl_hours: int = 24
 	_impl_cls: str = "proteus.data.downloads.proteus_dataset.download.ExperimentalDataDownload"
 
 
 def register_download():
 	cs = ConfigStore.instance()
-	cs.store("default", node=[ExperimentalDataDownloadCfg()], group="download_methods")
+	cs.store("rcsb-pdb", node=[ExperimentalDataDownloadCfg()], group="download_methods")
