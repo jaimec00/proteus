@@ -85,12 +85,11 @@ jobs:
           1. Correctness and potential bugs
           2. Performance concerns
           3. Code style and readability
-          4. Security issues
-          5. Suggestions for improvement
+          4. Suggestions for improvement
 
           If the user asked a specific question in their comment, answer that directly as well.
 
-          Format your response as a clear, well-structured markdown review suitable for a GitHub PR comment."
+          Format your response as a clear, well-structured markdown review suitable for a GitHub PR comment. Do not use emojis."
 
           # Call Claude API
           RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
@@ -101,7 +100,7 @@ jobs:
               --arg prompt "$PROMPT" \
               '{
                 "model": "claude-sonnet-4-20250514",
-                "max_tokens": 4096,
+                "max_tokens": 8192,
                 "messages": [{"role": "user", "content": $prompt}]
               }')")
 
