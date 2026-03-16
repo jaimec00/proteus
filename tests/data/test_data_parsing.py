@@ -195,6 +195,53 @@ class TestComputeChainSimilarities:
 		np.testing.assert_allclose(np.diag(tm), 1.0)
 		np.testing.assert_allclose(np.diag(si), 1.0)
 
+	def test_homo_oligomer_dedup(self):
+		"""chains with identical sequences should be deduped — only cross-group alignments computed"""
+		from unittest.mock import patch, MagicMock
+
+		coords_a = np.array([
+			[0, 0, 0], [3.8, 0, 0], [7.6, 0, 0], [11.4, 0, 0],
+			[15.2, 0, 0], [19.0, 0, 0], [22.8, 0, 0], [26.6, 0, 0],
+		], dtype=np.float32)
+		coords_b = np.cumsum(np.ones((8, 3), dtype=np.float32) * 3.8, axis=0)
+		seq_ab = "ACDEFGHI"
+		seq_cd = "WWWWWWWW"
+
+		chains = {
+			"A": _make_chain(seq_ab, coords_a),
+			"B": _make_chain(seq_ab, coords_a.copy()),
+			"C": _make_chain(seq_cd, coords_b),
+			"D": _make_chain(seq_cd, coords_b.copy()),
+		}
+
+		import tmtools as _tmtools
+		original_tm_align = _tmtools.tm_align
+
+		call_count = [0]
+		def counting_tm_align(*args, **kwargs):
+			call_count[0] += 1
+			return original_tm_align(*args, **kwargs)
+
+		with patch("proteus.data.downloads.proteus_dataset.data_parsing.tmtools.tm_align", side_effect=counting_tm_align):
+			tm, si = compute_chain_similarities(chains, ["A", "B", "C", "D"])
+
+		# within-group pairs should be 1.0
+		np.testing.assert_allclose(tm[0, 1], 1.0)
+		np.testing.assert_allclose(tm[1, 0], 1.0)
+		np.testing.assert_allclose(tm[2, 3], 1.0)
+		np.testing.assert_allclose(tm[3, 2], 1.0)
+		np.testing.assert_allclose(si[0, 1], 1.0)
+		np.testing.assert_allclose(si[2, 3], 1.0)
+
+		# cross-group pairs should be computed (not 1.0 for different sequences)
+		assert 0 < tm[0, 2] < 1
+		# all cross-group pairs should match (broadcast from representative)
+		np.testing.assert_allclose(tm[0, 2], tm[1, 3])
+		np.testing.assert_allclose(si[0, 2], si[1, 3])
+
+		# only 1 tm_align call (one unique cross-group pair)
+		assert call_count[0] == 1, f"expected 1 tm_align call, got {call_count[0]}"
+
 	def test_index_order_matches_chain_keys(self):
 		"""array indices must follow the provided chain_ids order"""
 		coords_a = np.array([[0, 0, 0], [3.8, 0, 0], [7.6, 0, 0], [11.4, 0, 0]], dtype=np.float32)

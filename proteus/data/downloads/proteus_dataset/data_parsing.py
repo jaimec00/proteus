@@ -190,20 +190,50 @@ def compute_chain_similarities(
 		ca_coords.append(ca_xyz)
 		sequences.append(chain[ChainKey.SEQUENCE])
 
+	# group chains by sequence — identical sequences get deduped
+	seq_to_indices: dict[str, list[int]] = {}
+	for idx, seq in enumerate(sequences):
+		seq_to_indices.setdefault(seq, []).append(idx)
+
+	unique_seqs = list(seq_to_indices.keys())
+
+	# fast path: all chains share the same sequence (homo-oligomer)
+	if len(unique_seqs) == 1:
+		return np.ones((C, C), dtype=np.float32), np.ones((C, C), dtype=np.float32)
+
+	# fill within-group pairs with 1.0
+	for indices in seq_to_indices.values():
+		for a in indices:
+			for b in indices:
+				tm_scores[a, b] = 1.0
+				seq_identity[a, b] = 1.0
+
+	# compute alignments only between unique-sequence representatives
 	matrix = parasail.blosum62
+	unique_groups = list(seq_to_indices.values())
 
-	for i in range(C):
-		for j in range(i + 1, C):
-			# tm-score (asymmetric — normalized by each chain's length)
-			result = tmtools.tm_align(ca_coords[i], ca_coords[j], sequences[i], sequences[j])
-			tm_scores[i, j] = result.tm_norm_chain1
-			tm_scores[j, i] = result.tm_norm_chain2
+	for gi in range(len(unique_groups)):
+		for gj in range(gi + 1, len(unique_groups)):
+			rep_i = unique_groups[gi][0]
+			rep_j = unique_groups[gj][0]
 
-			# sequence identity via parasail global alignment
-			res = parasail.nw_stats_striped_16(sequences[i], sequences[j], gap_open, gap_extend, matrix)
-			max_len = max(len(sequences[i]), len(sequences[j]))
-			seq_identity[i, j] = res.similar / max_len
-			seq_identity[j, i] = seq_identity[i, j]
+			# tm-score between representatives
+			result = tmtools.tm_align(ca_coords[rep_i], ca_coords[rep_j], sequences[rep_i], sequences[rep_j])
+			tm_ij = result.tm_norm_chain1
+			tm_ji = result.tm_norm_chain2
+
+			# sequence identity between representatives
+			res = parasail.nw_stats_striped_16(sequences[rep_i], sequences[rep_j], gap_open, gap_extend, matrix)
+			max_len = max(len(sequences[rep_i]), len(sequences[rep_j]))
+			si_val = res.similar / max_len
+
+			# broadcast to all member pairs
+			for a in unique_groups[gi]:
+				for b in unique_groups[gj]:
+					tm_scores[a, b] = tm_ij
+					tm_scores[b, a] = tm_ji
+					seq_identity[a, b] = si_val
+					seq_identity[b, a] = si_val
 
 	return tm_scores, seq_identity
 
