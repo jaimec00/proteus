@@ -29,9 +29,10 @@ from proteus.data.downloads.proteus_dataset.data_parsing import _parse_mmcif, co
 
 logger = logging.getLogger(__name__)
 
-# CPU-bound work (parsing, alignment, compression) — use half the available
-# cores to leave headroom for the async event loop and I/O
-_PROCESS_POOL_WORKERS = len(os.sched_getaffinity(0)) // 2
+# one process per core minus a small reserve for the async event loop and OS.
+# the C bindings here (tmtools, parasail, zstd) are single-threaded per call,
+# so each worker maps 1:1 to a core.
+_PROCESS_POOL_WORKERS = max(1, os.cpu_count() - 2)
 
 
 @dataclass(frozen=True)
