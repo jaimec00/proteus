@@ -62,3 +62,4 @@ class MMSeqsCfg(ClusterMethodCfg):
 def register_cluster():
 	cs = ConfigStore.instance()
 	cs.store("default", node=[FoldSeekCfg(), MMSeqsCfg()], group="cluster_methods")
+	cs.store("sweep", node=[FoldSeekCfg(tmscore_thresholds=[0.5,0.7]), MMSeqsCfg(seq_id_thresholds=[0.3,0.5])], group="cluster_methods")

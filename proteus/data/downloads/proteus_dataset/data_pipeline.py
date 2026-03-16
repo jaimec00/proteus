@@ -48,14 +48,14 @@ class DataPipeline:
 		self.s3_path = S3Path(cfg.s3_path)
 		self.local_path = Path(cfg.local_path)
 
-	def download(self):
+	def download(self, profiler=None):
 		index_rows = []
 		for method in self.download_methods:
-			index_rows.extend(method.download())
+			index_rows.extend(method.download(profiler=profiler))
 		return index_rows
 
-	def run(self):
-		index_rows = self.download()
+	def run(self, profiler=None):
+		index_rows = self.download(profiler=profiler)
 		index_path = self.local_path / DataPath.INDEX
 		index_path.parent.mkdir(parents=True, exist_ok=True)
 

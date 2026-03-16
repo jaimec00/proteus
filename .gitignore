@@ -22,10 +22,8 @@ pixi.lock
 .vscode
 docs/_build/
 docs/api/generated/
+profile.jsonl
 
 # claude code
 .claude/plans/
 .claude/projects/
-
-# rust
-target/
