@@ -19,6 +19,7 @@ def exp_cfg(tmp_path):
 		max_resolution=3.5,
 		max_entries=10,
 		min_chain_length=4,
+		pdbredo_cache_ttl_hours=24,
 	)
 
 

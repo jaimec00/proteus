@@ -1,5 +1,7 @@
 import gzip
+import json
 import asyncio
+import time
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 
@@ -191,3 +193,78 @@ class TestDownloadIntegration:
 		# checkpoint written
 		checkpoint = tmp_path / "checkpoint.jsonl"
 		assert checkpoint.exists()
+
+
+# ---------------------------------------------------------------------------
+# TestPdbredoCache
+# ---------------------------------------------------------------------------
+
+@pytest.mark.cpu
+class TestPdbredoCache:
+
+	def test_cache_hit_skips_rsync(self, exp_download):
+		"""valid cache within TTL should skip rsync entirely"""
+		local = exp_download.local_path
+		local.mkdir(parents=True, exist_ok=True)
+		cache_path = local / "pdbredo_ids_cache.json"
+		cache_path.write_text(json.dumps({
+			"timestamp": time.time(),
+			"ids": ["1abc", "2def"],
+		}))
+
+		with patch("subprocess.run") as mock_rsync:
+			ids = exp_download._get_pdbredo_ids()
+
+		mock_rsync.assert_not_called()
+		assert ids == {"1abc", "2def"}
+
+	def test_cache_expired_runs_rsync(self, exp_download):
+		"""cache older than TTL should trigger rsync"""
+		local = exp_download.local_path
+		local.mkdir(parents=True, exist_ok=True)
+		cache_path = local / "pdbredo_ids_cache.json"
+		cache_path.write_text(json.dumps({
+			"timestamp": time.time() - (exp_download.pdbredo_cache_ttl_hours + 1) * 3600,
+			"ids": ["old"],
+		}))
+
+		# mock rsync to return a prefix list then entry list
+		def mock_run(cmd, **kwargs):
+			result = MagicMock()
+			result.returncode = 0
+			result.check_returncode = MagicMock()
+			rsync_url = cmd[-1]
+			if rsync_url.endswith("pdb-redo/"):
+				result.stdout = "drwxr-xr-x 4096 2024/01/01 00:00:00 ab\n"
+			else:
+				result.stdout = "drwxr-xr-x 4096 2024/01/01 00:00:00 1abc\n"
+			return result
+
+		with patch("proteus.data.downloads.proteus_dataset.download.experimental.subprocess.run", side_effect=mock_run):
+			ids = exp_download._get_pdbredo_ids()
+
+		assert "1abc" in ids
+		assert "old" not in ids
+
+	def test_cache_corrupted_falls_back(self, exp_download):
+		"""corrupted cache file should gracefully fall back to rsync"""
+		local = exp_download.local_path
+		local.mkdir(parents=True, exist_ok=True)
+		cache_path = local / "pdbredo_ids_cache.json"
+		cache_path.write_text("not valid json {{{")
+
+		def mock_run(cmd, **kwargs):
+			result = MagicMock()
+			result.returncode = 0
+			result.check_returncode = MagicMock()
+			rsync_url = cmd[-1]
+			if rsync_url.endswith("pdb-redo/"):
+				result.stdout = "drwxr-xr-x 4096 2024/01/01 00:00:00 ab\n"
+			else:
+				result.stdout = "drwxr-xr-x 4096 2024/01/01 00:00:00 2def\n"
+			return result
+
+		with patch("proteus.data.downloads.proteus_dataset.download.experimental.subprocess.run", side_effect=mock_run):
+			ids = exp_download._get_pdbredo_ids()
+
+		assert "2def" in ids

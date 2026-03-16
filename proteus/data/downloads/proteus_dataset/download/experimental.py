@@ -2,11 +2,14 @@ import gzip
 import io
 import json
 import logging
+import multiprocessing
 import os
 import random
 import re
 import subprocess
 import asyncio
+import time
+from dataclasses import dataclass
 
 import aiohttp
 import aioboto3
@@ -14,7 +17,7 @@ import requests
 from pathlib import Path
 from cloudpathlib import S3Path
 from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 from proteus.types import Dict, List, Tuple, Set
 from proteus.utils.s3_utils import REGION
@@ -26,7 +29,72 @@ from proteus.data.downloads.proteus_dataset.data_parsing import _parse_mmcif, co
 
 logger = logging.getLogger(__name__)
 
-_THREAD_POOL_WORKERS = len(os.sched_getaffinity(0)) * 4
+# CPU-bound work (parsing, alignment, compression) — use half the available
+# cores to leave headroom for the async event loop and I/O
+_PROCESS_POOL_WORKERS = len(os.sched_getaffinity(0)) // 2
+
+
+@dataclass(frozen=True)
+class _ProcessEntryConfig:
+	methods: frozenset
+	max_resolution: float
+	min_chain_length: int
+	local_path: str
+	zstd_level: int
+	required_inputs: frozenset
+
+
+def _process_entry(
+	cfg: _ProcessEntryConfig, pdb_id: str, raw: bytes, is_pdb_redo: bool,
+) -> tuple[bytes, list[str], dict] | None:
+	"""all CPU-bound work for one entry — decompress, parse, filter, compute similarities, serialize.
+	runs in a dedicated process pool."""
+	# decompress and parse
+	if is_pdb_redo:
+		content = raw.decode("utf-8")
+		data = _parse_mmcif(
+			content, cfg.methods, cfg.max_resolution,
+			cfg.min_chain_length, override_method=ExpMethods.XRAY,
+		)
+		source = DataSource.PDB_REDO
+	else:
+		with gzip.open(io.BytesIO(raw), "rt") as f:
+			content = f.read()
+		data = _parse_mmcif(content, cfg.methods, cfg.max_resolution, cfg.min_chain_length)
+		source = DataSource.RCSB
+	if data is None:
+		return None
+	data[ProteinKey.SOURCE] = source
+
+	local_path = Path(cfg.local_path)
+
+	# write input files for clustering methods that need them
+	for chain_id, chain_data in data[ProteinKey.CHAINS].items():
+		if ClusterInputType.MMCIF in cfg.required_inputs:
+			cif_path = local_path / "raw_mmcif" / f"{pdb_id}_{chain_id}.cif.gz"
+			cif_path.write_bytes(gzip.compress(chain_data[ChainKey.CIF].encode()))
+
+		if ClusterInputType.FASTA in cfg.required_inputs:
+			fasta_path = local_path / "raw_fasta" / f"{pdb_id}_{chain_id}.fasta"
+			fasta_path.write_text(f">{pdb_id}_{chain_id}\n{chain_data[ChainKey.SEQUENCE]}\n")
+
+	# compute chain-to-chain similarities
+	chain_ids = list(data[ProteinKey.CHAINS].keys())
+	tm_scores, seq_identity = compute_chain_similarities(data[ProteinKey.CHAINS], chain_ids)
+	data[ProteinKey.CHAIN_TM_SCORES] = tm_scores
+	data[ProteinKey.CHAIN_SEQ_IDENTITY] = seq_identity
+
+	# serialize
+	blob = _serialize_pdb_blob(pdb_id, data, cfg.zstd_level)
+	meta = {
+		ProteinKey.RESOLUTION: data[ProteinKey.RESOLUTION],
+		ProteinKey.METHOD: data[ProteinKey.METHOD],
+		ProteinKey.DEPOSIT_DATE: data[ProteinKey.DEPOSIT_DATE],
+		ProteinKey.SOURCE: data[ProteinKey.SOURCE],
+		ProteinKey.MEAN_PLDDT: data[ProteinKey.MEAN_PLDDT],
+		ProteinKey.PTM: data[ProteinKey.PTM],
+	}
+	return blob, chain_ids, meta
 
 
 class ExperimentalDataDownload(DownloadMethodBase):
@@ -45,6 +113,7 @@ class ExperimentalDataDownload(DownloadMethodBase):
 
 		# other necessary stuff
 		self.semaphore_limit = cfg.semaphore_limit
+		self.pipeline_concurrency = cfg.pipeline_concurrency
 		self.chunk_size = cfg.chunk_size
 		self.shard_size_bytes = cfg.shard_size_mb * 1024 * 1024
 		self.zstd_level = cfg.zstd_level
@@ -54,13 +123,21 @@ class ExperimentalDataDownload(DownloadMethodBase):
 		self.local_path = Path(cfg.local_path)
 		self.checkpoint_path = Path(cfg.checkpoint_path)
 
+		# cache
+		self.pdbredo_cache_ttl_hours = cfg.pdbredo_cache_ttl_hours
+
 		# which input files to write during download
 		self.required_inputs = required_inputs
 
-	def download(self):
+	def download(self, profiler=None):
 
 		# get ids, pdb redo returns all in the db, rcsb returns all with filters
+		if profiler:
+			profiler.set_phase("rsync_listing")
 		pdbredo_ids = self._get_pdbredo_ids()
+
+		if profiler:
+			profiler.set_phase("rcsb_query")
 		rcsb_ids = self._get_rcsb_ids()
 
 		# filter out pdbs from pdb redo that arent in rcsb set, since rcsb set applied the filter
@@ -82,6 +159,8 @@ class ExperimentalDataDownload(DownloadMethodBase):
 		boundary = len(rcsb)
 		logger.info(f"{len(rcsb)} rcsb-only, {len(pdbredo)} pdb-redo entries")
 
+		if profiler:
+			profiler.set_phase("download")
 		return asyncio.run(self._download_async(combined, boundary))
 
 	def _load_checkpoint(self) -> Tuple[List[dict], Set[str], int]:
@@ -114,14 +193,37 @@ class ExperimentalDataDownload(DownloadMethodBase):
 		boundary = sum(1 for pid in rcsb_only if pid not in done_pids)
 		logger.info(f"{len(remaining)} to download ({len(done_pids)} already done)")
 
+		# pre-create output directories to avoid redundant mkdir calls per entry
+		if ClusterInputType.MMCIF in self.required_inputs:
+			(self.local_path / "raw_mmcif").mkdir(parents=True, exist_ok=True)
+		if ClusterInputType.FASTA in self.required_inputs:
+			(self.local_path / "raw_fasta").mkdir(parents=True, exist_ok=True)
+
 		pbar = tqdm(total=len(remaining), desc="downloading")
 
 		connector = aiohttp.TCPConnector(limit=0)
 		timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_read=60)
 		self._semaphore = asyncio.Semaphore(self.semaphore_limit)
+		pipeline_sem = asyncio.Semaphore(self.pipeline_concurrency)
 		s3_session = aioboto3.Session()
 		succeeded, failed = 0, 0
-		executor = ThreadPoolExecutor(max_workers=_THREAD_POOL_WORKERS)
+		mp_ctx = multiprocessing.get_context("forkserver")
+		executor = ProcessPoolExecutor(max_workers=_PROCESS_POOL_WORKERS, mp_context=mp_ctx)
+		process_cfg = _ProcessEntryConfig(
+			methods=frozenset(self.methods),
+			max_resolution=self.max_resolution,
+			min_chain_length=self.min_chain_length,
+			local_path=str(self.local_path),
+			zstd_level=self.zstd_level,
+			required_inputs=frozenset(self.required_inputs),
+		)
+		self._pipeline_t0 = time.monotonic()
+
+		# open stage timing log
+		stage_log_path = self.local_path / "stage_times.jsonl"
+		self._stage_log = open(stage_log_path, "w")
+		logger.info(f"stage timing log: {stage_log_path}")
+
 		async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session, \
 			s3_session.client("s3", region_name=REGION) as s3_client:
 
@@ -137,9 +239,11 @@ class ExperimentalDataDownload(DownloadMethodBase):
 			shard_lock = asyncio.Lock()
 
 			async def _task(pdb_id, is_pdb_redo):
-				result = await self._download_entry(
-					pdb_id, session, shard_writer, shard_lock, executor, is_pdb_redo,
-				)
+				async with pipeline_sem:
+					result = await self._download_entry(
+						pdb_id, session, shard_writer, shard_lock, executor, is_pdb_redo,
+						process_cfg=process_cfg,
+					)
 				pbar.update(1)
 				return result
 
@@ -158,69 +262,19 @@ class ExperimentalDataDownload(DownloadMethodBase):
 			index_rows = await shard_writer.finalize()
 		executor.shutdown(wait=False)
 		pbar.close()
+		self._stage_log.close()
 
 		logger.info(f"done: {succeeded} succeeded, {failed} skipped out of {len(remaining)}")
 		return index_rows
 
-	def _process_entry(
-		self, pdb_id: str, raw: bytes, is_pdb_redo: bool,
-	) -> tuple[bytes, list[str], dict] | None:
-		"""all CPU-bound work for one entry — decompress, parse, filter, compute similarities, serialize.
-		runs in a dedicated thread pool."""
-		# decompress and parse
-		if is_pdb_redo:
-			content = raw.decode("utf-8")
-			data = _parse_mmcif(
-				content, self.methods, self.max_resolution,
-				self.min_chain_length, override_method=ExpMethods.XRAY,
-			)
-			source = DataSource.PDB_REDO
-		else:
-			with gzip.open(io.BytesIO(raw), "rt") as f:
-				content = f.read()
-			data = _parse_mmcif(content, self.methods, self.max_resolution, self.min_chain_length)
-			source = DataSource.RCSB
-		if data is None:
-			return None
-		data[ProteinKey.SOURCE] = source
-
-		# write input files for clustering methods that need them
-		for chain_id, chain_data in data[ProteinKey.CHAINS].items():
-			if ClusterInputType.MMCIF in self.required_inputs:
-				mmcif_dir = self.local_path / "raw_mmcif"
-				mmcif_dir.mkdir(parents=True, exist_ok=True)
-				cif_path = mmcif_dir / f"{pdb_id}_{chain_id}.cif.gz"
-				cif_path.write_bytes(gzip.compress(chain_data[ChainKey.CIF].encode()))
-
-			if ClusterInputType.FASTA in self.required_inputs:
-				fasta_dir = self.local_path / "raw_fasta"
-				fasta_dir.mkdir(parents=True, exist_ok=True)
-				fasta_path = fasta_dir / f"{pdb_id}_{chain_id}.fasta"
-				fasta_path.write_text(f">{pdb_id}_{chain_id}\n{chain_data[ChainKey.SEQUENCE]}\n")
-
-		# compute chain-to-chain similarities
-		chain_ids = list(data[ProteinKey.CHAINS].keys())
-		tm_scores, seq_identity = compute_chain_similarities(data[ProteinKey.CHAINS], chain_ids)
-		data[ProteinKey.CHAIN_TM_SCORES] = tm_scores
-		data[ProteinKey.CHAIN_SEQ_IDENTITY] = seq_identity
-
-		# serialize
-		blob = _serialize_pdb_blob(pdb_id, data, self.zstd_level)
-		meta = {
-			ProteinKey.RESOLUTION: data[ProteinKey.RESOLUTION],
-			ProteinKey.METHOD: data[ProteinKey.METHOD],
-			ProteinKey.DEPOSIT_DATE: data[ProteinKey.DEPOSIT_DATE],
-			ProteinKey.SOURCE: data[ProteinKey.SOURCE],
-			ProteinKey.MEAN_PLDDT: data[ProteinKey.MEAN_PLDDT],
-			ProteinKey.PTM: data[ProteinKey.PTM],
-		}
-		return blob, chain_ids, meta
-
 	async def _download_entry(
 		self, pdb_id: str, session: aiohttp.ClientSession,
 		shard_writer: "ShardWriter", shard_lock: asyncio.Lock,
-		executor: ThreadPoolExecutor, is_pdb_redo: bool = False,
+		executor: ProcessPoolExecutor, is_pdb_redo: bool = False,
+		process_cfg: _ProcessEntryConfig | None = None,
 	):
+		t_start = time.monotonic()
+
 		# stage 1: async network fetch
 		raw = None
 		if is_pdb_redo:
@@ -232,17 +286,44 @@ class ExperimentalDataDownload(DownloadMethodBase):
 			is_pdb_redo = False
 		if raw is None:
 			return None
+		t_fetch = time.monotonic()
+		raw_kb = len(raw) / 1024
 
-		# stage 2: all CPU work in one thread call
+		# stage 2: all CPU work in one process call (includes queue wait)
 		loop = asyncio.get_running_loop()
-		result = await loop.run_in_executor(executor, self._process_entry, pdb_id, raw, is_pdb_redo)
+		result = await loop.run_in_executor(
+			executor, _process_entry, process_cfg, pdb_id, raw, is_pdb_redo,
+		)
+		t_cpu = time.monotonic()
 		if result is None:
 			return None
 
 		# stage 3: shard write under lock
 		blob, chain_ids, meta = result
+		t_lock_wait_start = time.monotonic()
 		async with shard_lock:
+			t_lock_acquired = time.monotonic()
 			shard_writer.add(pdb_id, blob, chain_ids, meta)
+		t_write = time.monotonic()
+
+		blob_kb = len(blob) / 1024
+
+		# emit stage timing
+		if hasattr(self, "_stage_log") and self._stage_log and not self._stage_log.closed:
+			row = {
+				"pdb_id": pdb_id,
+				"wall": round(t_start - self._pipeline_t0, 3),
+				"fetch": round(t_fetch - t_start, 4),
+				"cpu_wait": round(t_cpu - t_fetch, 4),
+				"write_lock_wait": round(t_lock_acquired - t_lock_wait_start, 4),
+				"write": round(t_write - t_lock_acquired, 4),
+				"total": round(t_write - t_start, 4),
+				"raw_kb": round(raw_kb, 1),
+				"blob_kb": round(blob_kb, 1),
+				"is_pdb_redo": is_pdb_redo,
+			}
+			self._stage_log.write(json.dumps(row) + "\n")
+			self._stage_log.flush()
 
 		return pdb_id
 
@@ -295,7 +376,21 @@ class ExperimentalDataDownload(DownloadMethodBase):
 	def _get_pdbredo_ids(self) -> set[str]:
 		"""fetch the set of PDB IDs available on PDB-REDO via parallel rsync listing.
 		lists 2-char prefix dirs, then queries each prefix in parallel to get 4-char PDB IDs.
-		returns lowercase 4-char IDs. on failure returns empty set (graceful degradation)."""
+		returns lowercase 4-char IDs. on failure returns empty set (graceful degradation).
+		results are cached locally with a configurable TTL to avoid repeated rsync calls."""
+
+		# check cache
+		cache_path = self.local_path / "pdbredo_ids_cache.json"
+		try:
+			if cache_path.exists():
+				cached = json.loads(cache_path.read_text())
+				age_hours = (time.time() - cached["timestamp"]) / 3600
+				if age_hours < self.pdbredo_cache_ttl_hours:
+					ids = set(cached["ids"])
+					logger.info(f"pdb-redo listing from cache ({len(ids)} entries, {age_hours:.1f}h old)")
+					return ids
+		except Exception as e:
+			logger.warning(f"pdb-redo cache read failed: {e}, falling back to rsync")
 
 		pdb_id_re = re.compile(r'[0-9][a-z0-9]{3}')
 		rsync_base = "rsync://rsync.pdb-redo.eu/pdb-redo"
@@ -346,6 +441,14 @@ class ExperimentalDataDownload(DownloadMethodBase):
 						logger.warning(f"pdb-redo prefix {futures[fut]}: {e}")
 
 			logger.info(f"pdb-redo listing: {len(ids)} entries")
+
+			# write cache (best-effort)
+			try:
+				cache_path.parent.mkdir(parents=True, exist_ok=True)
+				cache_path.write_text(json.dumps({"timestamp": time.time(), "ids": sorted(ids)}))
+			except Exception as e:
+				logger.warning(f"pdb-redo cache write failed: {e}")
+
 			return ids
 		except Exception as e:
 			logger.warning(f"failed to fetch pdb-redo listing: {e}. all entries will use rcsb.")
