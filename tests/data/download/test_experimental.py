@@ -9,7 +9,6 @@ import aiohttp
 from aioresponses import aioresponses
 
 from proteus.data.data_constants import ExpMethods, ClusterInputType, IndexCol
-from proteus.data.downloads.proteus_dataset.conf.download import ExperimentalDataDownloadCfg
 from proteus.data.downloads.proteus_dataset.download.experimental import ExperimentalDataDownload
 
 

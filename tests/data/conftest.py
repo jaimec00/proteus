@@ -11,6 +11,7 @@ def _build_mmcif(
 	resolution: float | None = 2.0,
 	chains: list[tuple[str, str]] | None = None,
 	deposit_date: str = "2020-01-01",
+	assemblies: list[list[dict]] | None = None,
 ) -> str:
 	"""build a minimal but valid mmCIF string that gemmi can parse.
 
@@ -45,6 +46,66 @@ def _build_mmcif(
 		entity_lines.append(f"{i} polymer")
 		poly_lines.append(f"{i} polypeptide(L) {chain_id}")
 	lines += entity_lines + poly_lines
+
+	# assembly records for gemmi to populate structure.assemblies
+	if assemblies is not None:
+		all_ops = []
+		gen_records = []
+		for asmb_idx, asmb in enumerate(assemblies):
+			for gen in asmb:
+				op_ids = []
+				for op in gen["operators"]:
+					all_ops.append(op)
+					op_ids.append(str(len(all_ops)))
+				gen_records.append((str(asmb_idx + 1), ",".join(op_ids), ",".join(gen["chains"])))
+
+		# gemmi needs all 5 _pdbx_struct_assembly columns to parse assemblies
+		lines += [
+			"loop_",
+			"_pdbx_struct_assembly.id",
+			"_pdbx_struct_assembly.details",
+			"_pdbx_struct_assembly.method_details",
+			"_pdbx_struct_assembly.oligomeric_details",
+			"_pdbx_struct_assembly.oligomeric_count",
+		]
+		for asmb_idx in range(len(assemblies)):
+			lines.append(f"{asmb_idx + 1} author_defined_assembly ? ? ?")
+
+		lines += [
+			"loop_",
+			"_pdbx_struct_assembly_gen.assembly_id",
+			"_pdbx_struct_assembly_gen.oper_expression",
+			"_pdbx_struct_assembly_gen.asym_id_list",
+		]
+		for asmb_id, oper_expr, chain_list in gen_records:
+			lines.append(f"{asmb_id} {oper_expr} {chain_list}")
+
+		lines += [
+			"loop_",
+			"_pdbx_struct_oper_list.id",
+			"_pdbx_struct_oper_list.type",
+			"_pdbx_struct_oper_list.matrix[1][1]",
+			"_pdbx_struct_oper_list.matrix[1][2]",
+			"_pdbx_struct_oper_list.matrix[1][3]",
+			"_pdbx_struct_oper_list.vector[1]",
+			"_pdbx_struct_oper_list.matrix[2][1]",
+			"_pdbx_struct_oper_list.matrix[2][2]",
+			"_pdbx_struct_oper_list.matrix[2][3]",
+			"_pdbx_struct_oper_list.vector[2]",
+			"_pdbx_struct_oper_list.matrix[3][1]",
+			"_pdbx_struct_oper_list.matrix[3][2]",
+			"_pdbx_struct_oper_list.matrix[3][3]",
+			"_pdbx_struct_oper_list.vector[3]",
+		]
+		for i, op in enumerate(all_ops):
+			mat = op[:3, :3]
+			vec = op[:3, 3]
+			lines.append(
+				f"{i + 1} 'crystal symmetry operation' "
+				f"{mat[0, 0]:.6f} {mat[0, 1]:.6f} {mat[0, 2]:.6f} {vec[0]:.6f} "
+				f"{mat[1, 0]:.6f} {mat[1, 1]:.6f} {mat[1, 2]:.6f} {vec[1]:.6f} "
+				f"{mat[2, 0]:.6f} {mat[2, 1]:.6f} {mat[2, 2]:.6f} {vec[2]:.6f}"
+			)
 
 	# atom site loop
 	lines += [
@@ -112,11 +173,11 @@ def _build_protein_dict(
 			ChainKey.CIF: f"data_{chain_id}\nloop_\n",
 		}
 
-	# identity assembly
-	assemblies = [{
+	# identity assembly (list of assemblies, each a list of generators)
+	assemblies = [[{
 		ProteinKey.CHAINS: [cid for cid, _ in chains],
 		ProteinKey.ASMB_XFORMS: np.eye(4, dtype=np.float32)[np.newaxis],
-	}]
+	}]]
 
 	return {
 		ProteinKey.CHAINS: chains_data,

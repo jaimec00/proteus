@@ -269,7 +269,7 @@ class TestPDBData:
 		xform = np.stack([np.eye(4, dtype=np.float32)] * 3, axis=0)
 		xform[1, :3, 3] = [10, 0, 0]
 		xform[2, :3, 3] = [0, 10, 0]
-		pdb_dict[ProteinKey.ASSEMBLIES][0][ProteinKey.ASMB_XFORMS] = xform
+		pdb_dict[ProteinKey.ASSEMBLIES][0][0][ProteinKey.ASMB_XFORMS] = xform
 
 		pdb_data = PDBData(
 			pdb_dict,
@@ -281,9 +281,9 @@ class TestPDBData:
 
 		asmb = pdb_data.sample_asmb("A")
 		assert asmb is not None
-		# should only have identity xform (1 copy)
-		assert asmb.asmb_xform.shape[0] == 1
-		np.testing.assert_array_equal(asmb.asmb_xform[0], np.eye(4))
+		# should only have identity xform (1 copy) — all generators reduced
+		assert len(asmb._generator_info) == 1
+		np.testing.assert_array_equal(asmb._generator_info[0][1][0], np.eye(4))
 
 
 # ── Data iterator (integration) ──
@@ -307,10 +307,10 @@ class TestDataIterator:
 		}
 		return {
 			ProteinKey.CHAINS: chains_data,
-			ProteinKey.ASSEMBLIES: [{
+			ProteinKey.ASSEMBLIES: [[{
 				ProteinKey.CHAINS: ["A"],
 				ProteinKey.ASMB_XFORMS: np.eye(4, dtype=np.float32)[np.newaxis],
-			}],
+			}]],
 			ProteinKey.RESOLUTION: 2.0,
 			ProteinKey.METHOD: "X-RAY DIFFRACTION",
 			ProteinKey.DEPOSIT_DATE: "2020-01-01",

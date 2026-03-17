@@ -14,7 +14,6 @@ def exp_cfg(tmp_path):
 		shard_size_mb=1,
 		zstd_level=1,
 		semaphore_limit=2,
-		chunk_size=10,
 		methods=[ExpMethods.XRAY],
 		max_resolution=3.5,
 		max_entries=10,

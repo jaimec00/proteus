@@ -151,8 +151,8 @@ def _serialize_pdb_blob(pdb_id: str, data: Dict, zstd_level: int = 10) -> bytes:
 		ProteinKey.PTM: data[ProteinKey.PTM],
 		ProteinKey.CHAINS: chain_ids,
 		ProteinKey.ASSEMBLIES: [
-			{ProteinKey.CHAINS: a[ProteinKey.CHAINS], ProteinKey.ASMB_XFORMS: a[ProteinKey.ASMB_XFORMS].tolist()}
-			for a in data[ProteinKey.ASSEMBLIES]
+			[{ProteinKey.CHAINS: gen[ProteinKey.CHAINS], ProteinKey.ASMB_XFORMS: gen[ProteinKey.ASMB_XFORMS].tolist()} for gen in asmb]
+			for asmb in data[ProteinKey.ASSEMBLIES]
 		],
 	}
 	# np.void wraps raw bytes — npz cannot store strings natively
@@ -183,8 +183,8 @@ def _deserialize_pdb_blob(blob: bytes) -> Dict:
 		}
 
 	assemblies = [
-		{ProteinKey.CHAINS: a[ProteinKey.CHAINS], ProteinKey.ASMB_XFORMS: np.array(a[ProteinKey.ASMB_XFORMS], dtype=np.float32)}
-		for a in meta[ProteinKey.ASSEMBLIES]
+		[{ProteinKey.CHAINS: gen[ProteinKey.CHAINS], ProteinKey.ASMB_XFORMS: np.array(gen[ProteinKey.ASMB_XFORMS], dtype=np.float32)} for gen in asmb]
+		for asmb in meta[ProteinKey.ASSEMBLIES]
 	]
 
 	result = {

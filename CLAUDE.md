@@ -25,6 +25,11 @@ typically use `cpu` env unless `gpu` is necessary
 - Flash attention 2.8+ for transformer
 - **Never call `.item()`, `.cpu()`, or `.numpy()` on tensors in the training loop.** These force a CPU/GPU sync and stall the pipeline. Only sync at explicit logging boundaries (e.g. `get_metrics`).
 
+## Conversation Etiquette
+
+- do not make code edits in a new conversation unless the instructions specifically say to — answer questions first, discuss, and only edit when asked
+- when the user asks a question or reports an error, explain first — do not jump straight to a code edit unless explicitly asked to make the change
+
 ## Code Style
 
 - **Indentation: tabs, not spaces.** All Python files in this repo use tabs.

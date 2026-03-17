@@ -24,16 +24,22 @@ cs.store("default", DataPipelineCfg)
 
 @hydra.main(version_base=None, config_name="default")
 def main(cfg: DataPipelineCfg):
-	from proteus.data.downloads.proteus_dataset.profile_run import RunProfiler, print_summary, print_stage_summary
-	from pathlib import Path
-	with RunProfiler(path="profile.jsonl", interval=0.5) as profiler:
-		pipeline = DataPipeline(cfg)
-		pipeline.run(profiler=profiler)
+    profile = False
+    if profile:
+        from proteus.data.downloads.proteus_dataset.profile_run import RunProfiler, print_summary, print_stage_summary
+        from pathlib import Path
+        with RunProfiler(path="profile.jsonl", interval=0.5) as profiler:
+            pipeline = DataPipeline(cfg)
+            pipeline.run(profiler=profiler)
 
-	print_summary(Path("profile.jsonl"))
-	stage_path = Path(cfg.local_path) / "stage_times.jsonl"
-	if stage_path.exists():
-		print_stage_summary(stage_path)
+        print_summary(Path("profile.jsonl"))
+        stage_path = Path(cfg.local_path) / "stage_times.jsonl"
+        if stage_path.exists():
+            print_stage_summary(stage_path)
+    else:
+        pipeline = DataPipeline(cfg)
+        pipeline.run()
+
 
 if __name__ == "__main__":
 	main()

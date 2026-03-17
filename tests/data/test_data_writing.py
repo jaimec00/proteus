@@ -59,17 +59,18 @@ class TestSerializeDeserialize:
 			[[1, 0, 0, 10], [0, 1, 0, 20], [0, 0, 1, 30], [0, 0, 0, 1]],
 			[[0, 1, 0, 5], [1, 0, 0, 5], [0, 0, 1, 5], [0, 0, 0, 1]],
 		], dtype=np.float32)
-		data[ProteinKey.ASSEMBLIES] = [{
+		data[ProteinKey.ASSEMBLIES] = [[{
 			ProteinKey.CHAINS: ["A", "B"],
 			ProteinKey.ASMB_XFORMS: xform,
-		}]
+		}]]
 
 		blob = _serialize_pdb_blob("2xyz", data)
 		restored = _deserialize_pdb_blob(blob)
 
 		assert len(restored[ProteinKey.ASSEMBLIES]) == 1
+		assert len(restored[ProteinKey.ASSEMBLIES][0]) == 1
 		np.testing.assert_allclose(
-			restored[ProteinKey.ASSEMBLIES][0][ProteinKey.ASMB_XFORMS], xform, atol=1e-5,
+			restored[ProteinKey.ASSEMBLIES][0][0][ProteinKey.ASMB_XFORMS], xform, atol=1e-5,
 		)
 
 
