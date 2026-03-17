@@ -85,6 +85,72 @@ class TestParseMMCIF:
 		assert result is not None
 		assert result[ProteinKey.METHOD] == ExpMethods.XRAY
 
+	def test_single_generator_assembly(self, mmcif_builder):
+		"""1 assembly, 1 generator, 2 chains, 1 operator"""
+		cif = mmcif_builder(
+			chains=[("A", "ACDEFG"), ("B", "GGGGG")],
+			assemblies=[[
+				{"chains": ["A", "B"], "operators": [np.eye(4, dtype=np.float32)]},
+			]],
+		)
+		result = _parse_mmcif(cif, {ExpMethods.XRAY}, max_resolution=3.5)
+		assert result is not None
+		asmbs = result[ProteinKey.ASSEMBLIES]
+		assert len(asmbs) == 1
+		assert len(asmbs[0]) == 1
+		gen = asmbs[0][0]
+		assert set(gen[ProteinKey.CHAINS]) == {"A", "B"}
+		assert gen[ProteinKey.ASMB_XFORMS].shape == (1, 4, 4)
+
+	def test_multi_operator_assembly(self, mmcif_builder):
+		"""1 assembly, 1 generator, 2 chains, 3 operators"""
+		op1 = np.eye(4, dtype=np.float32)
+		op2 = np.eye(4, dtype=np.float32)
+		op2[:3, 3] = [10.0, 0.0, 0.0]
+		op3 = np.eye(4, dtype=np.float32)
+		op3[:3, 3] = [0.0, 10.0, 0.0]
+		cif = mmcif_builder(
+			chains=[("A", "ACDEFG"), ("B", "GGGGG")],
+			assemblies=[[
+				{"chains": ["A", "B"], "operators": [op1, op2, op3]},
+			]],
+		)
+		result = _parse_mmcif(cif, {ExpMethods.XRAY}, max_resolution=3.5)
+		assert result is not None
+		asmbs = result[ProteinKey.ASSEMBLIES]
+		assert len(asmbs) == 1
+		assert len(asmbs[0]) == 1
+		gen = asmbs[0][0]
+		assert set(gen[ProteinKey.CHAINS]) == {"A", "B"}
+		assert gen[ProteinKey.ASMB_XFORMS].shape == (3, 4, 4)
+		np.testing.assert_allclose(gen[ProteinKey.ASMB_XFORMS][0], op1, atol=1e-5)
+		np.testing.assert_allclose(gen[ProteinKey.ASMB_XFORMS][1], op2, atol=1e-5)
+		np.testing.assert_allclose(gen[ProteinKey.ASMB_XFORMS][2], op3, atol=1e-5)
+
+	def test_multi_generator_assembly(self, mmcif_builder):
+		"""1 assembly, 2 generators with different chains and operators"""
+		op1 = np.eye(4, dtype=np.float32)
+		op2 = np.eye(4, dtype=np.float32)
+		op2[:3, 3] = [10.0, 0.0, 0.0]
+		cif = mmcif_builder(
+			chains=[("A", "ACDEFG"), ("B", "GGGGG")],
+			assemblies=[[
+				{"chains": ["A"], "operators": [op1]},
+				{"chains": ["B"], "operators": [op1, op2]},
+			]],
+		)
+		result = _parse_mmcif(cif, {ExpMethods.XRAY}, max_resolution=3.5)
+		assert result is not None
+		asmbs = result[ProteinKey.ASSEMBLIES]
+		assert len(asmbs) == 1
+		assert len(asmbs[0]) == 2
+		gen0 = asmbs[0][0]
+		gen1 = asmbs[0][1]
+		assert gen0[ProteinKey.CHAINS] == ["A"]
+		assert gen0[ProteinKey.ASMB_XFORMS].shape == (1, 4, 4)
+		assert gen1[ProteinKey.CHAINS] == ["B"]
+		assert gen1[ProteinKey.ASMB_XFORMS].shape == (2, 4, 4)
+
 
 # ---------------------------------------------------------------------------
 # TestBestAtom
@@ -195,9 +261,9 @@ class TestComputeChainSimilarities:
 		np.testing.assert_allclose(np.diag(tm), 1.0)
 		np.testing.assert_allclose(np.diag(si), 1.0)
 
-	def test_homo_oligomer_dedup(self):
-		"""chains with identical sequences should be deduped — only cross-group alignments computed"""
-		from unittest.mock import patch, MagicMock
+	def test_skip_tm_for_similar_chains(self):
+		"""chains with high sequence similarity should skip TM-align"""
+		from unittest.mock import patch
 
 		coords_a = np.array([
 			[0, 0, 0], [3.8, 0, 0], [7.6, 0, 0], [11.4, 0, 0],
@@ -225,7 +291,7 @@ class TestComputeChainSimilarities:
 		with patch("proteus.data.downloads.proteus_dataset.data_parsing.tmtools.tm_align", side_effect=counting_tm_align):
 			tm, si = compute_chain_similarities(chains, ["A", "B", "C", "D"])
 
-		# within-group pairs should be 1.0
+		# identical-sequence pairs should be 1.0 (skipped TM via seq similarity)
 		np.testing.assert_allclose(tm[0, 1], 1.0)
 		np.testing.assert_allclose(tm[1, 0], 1.0)
 		np.testing.assert_allclose(tm[2, 3], 1.0)
@@ -235,12 +301,9 @@ class TestComputeChainSimilarities:
 
 		# cross-group pairs should be computed (not 1.0 for different sequences)
 		assert 0 < tm[0, 2] < 1
-		# all cross-group pairs should match (broadcast from representative)
-		np.testing.assert_allclose(tm[0, 2], tm[1, 3])
-		np.testing.assert_allclose(si[0, 2], si[1, 3])
 
-		# only 1 tm_align call (one unique cross-group pair)
-		assert call_count[0] == 1, f"expected 1 tm_align call, got {call_count[0]}"
+		# TM-align only called for dissimilar pairs (4 cross-group pairs: A-C, A-D, B-C, B-D)
+		assert call_count[0] == 4, f"expected 4 tm_align calls, got {call_count[0]}"
 
 	def test_index_order_matches_chain_keys(self):
 		"""array indices must follow the provided chain_ids order"""

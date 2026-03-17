@@ -43,6 +43,7 @@ class _ProcessEntryConfig:
 	local_path: str
 	zstd_level: int
 	required_inputs: frozenset
+	skip_tm_at_seqsim: float
 
 
 def _process_entry(
@@ -81,7 +82,9 @@ def _process_entry(
 
 	# compute chain-to-chain similarities
 	chain_ids = list(data[ProteinKey.CHAINS].keys())
-	tm_scores, seq_identity = compute_chain_similarities(data[ProteinKey.CHAINS], chain_ids)
+	tm_scores, seq_identity = compute_chain_similarities(
+		data[ProteinKey.CHAINS], chain_ids, skip_tm_at_seqsim=cfg.skip_tm_at_seqsim,
+	)
 	data[ProteinKey.CHAIN_TM_SCORES] = tm_scores
 	data[ProteinKey.CHAIN_SEQ_IDENTITY] = seq_identity
 
@@ -115,7 +118,6 @@ class ExperimentalDataDownload(DownloadMethodBase):
 		# other necessary stuff
 		self.semaphore_limit = cfg.semaphore_limit
 		self.pipeline_concurrency = cfg.pipeline_concurrency
-		self.chunk_size = cfg.chunk_size
 		self.shard_size_bytes = cfg.shard_size_mb * 1024 * 1024
 		self.zstd_level = cfg.zstd_level
 
@@ -126,6 +128,7 @@ class ExperimentalDataDownload(DownloadMethodBase):
 
 		# cache
 		self.pdbredo_cache_ttl_hours = cfg.pdbredo_cache_ttl_hours
+		self.skip_tm_at_seqsim = cfg.skip_tm_at_seqsim
 
 		# which input files to write during download
 		self.required_inputs = required_inputs
@@ -217,6 +220,7 @@ class ExperimentalDataDownload(DownloadMethodBase):
 			local_path=str(self.local_path),
 			zstd_level=self.zstd_level,
 			required_inputs=frozenset(self.required_inputs),
+			skip_tm_at_seqsim=self.skip_tm_at_seqsim,
 		)
 		self._pipeline_t0 = time.monotonic()
 

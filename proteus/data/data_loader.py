@@ -382,8 +382,9 @@ class Data(IterableDataset):
 				yield from batch_builder.add_sample(asmb)
 
 		yield from batch_builder.drain_buffer()
-		# reset resume step after full epoch
+		# reset resume step and advance epoch
 		self._resume_step = 0
+		self._sampler.epoch += 1
 
 	def __len__(self) -> int:
 		return len(self._sampler)

@@ -24,11 +24,14 @@ def _parse_mmcif(
 	if override_method is not None:
 		method = override_method
 	else:
-		method = structure.info['_exptl.method'] if '_exptl.method' in structure.info else ''
-		method = method.strip("'\" ")
-		if method not in methods:
-			logger.info(f"{pdb_id}: skipped, method '{method}' not in {methods}")
+		raw_method = structure.info['_exptl.method'] if '_exptl.method' in structure.info else ''
+		raw_method = raw_method.strip("'\" ")
+		# accept multi-method entries if any listed method matches
+		matched = [m for m in methods if m in raw_method]
+		if not matched:
+			logger.info(f"{pdb_id}: skipped, method '{raw_method}' not in {methods}")
 			return None
+		method = matched[0]
 
 	# filter by resolution (0.0 means unset)
 	if structure.resolution == 0.0 or structure.resolution > max_resolution:
@@ -124,25 +127,27 @@ def _parse_mmcif(
 		}
 
 	# assembly / biounit info with Nx4x4 homogeneous transforms
+	# each assembly is a list of generators, each generator has its own chains and operators
 	assemblies = []
 	for assembly in structure.assemblies:
-		biounit_chains = []
-		transforms = []
+		generators = []
 		for gen in assembly.generators:
-			biounit_chains.extend(list(gen.subchains) or list(gen.chains))
+			gen_chains = list(gen.subchains) or list(gen.chains)
+			biounit_chains = list(dict.fromkeys(c for c in gen_chains if c in chains_data))
+			if not biounit_chains:
+				continue
+			transforms = []
 			for oper in gen.operators:
 				mat4 = np.eye(4, dtype=np.float32)
 				mat4[:3, :3] = np.array(oper.transform.mat.tolist(), dtype=np.float32)
 				mat4[:3, 3] = np.array(oper.transform.vec.tolist(), dtype=np.float32)
 				transforms.append(mat4)
-		# only keep chains that passed filtering
-		biounit_chains = [c for c in biounit_chains if c in chains_data]
-		if not biounit_chains:
-			continue
-		assemblies.append({
-			ProteinKey.CHAINS: biounit_chains,
-			ProteinKey.ASMB_XFORMS: np.stack(transforms) if transforms else np.empty((0, 4, 4), dtype=np.float32),
-		})
+			generators.append({
+				ProteinKey.CHAINS: biounit_chains,
+				ProteinKey.ASMB_XFORMS: np.stack(transforms) if transforms else np.empty((0, 4, 4), dtype=np.float32),
+			})
+		if generators:
+			assemblies.append(generators)
 
 	if not chains_data:
 		logger.info(f"{pdb_id}: skipped, no chains with >= {min_chain_length} residues")
@@ -164,8 +169,13 @@ def _parse_mmcif(
 def compute_chain_similarities(
 	chains_data: dict, chain_ids: list[str],
 	gap_open: int = 10, gap_extend: int = 1,
+	skip_tm_at_seqsim: float = 0.95,
 ) -> tuple[np.ndarray, np.ndarray]:
 	"""compute pairwise chain TM-scores and sequence identity.
+
+	sequence alignment (parasail) is computed for all unique pairs first.
+	TM-align is only run for pairs below skip_tm_at_seqsim — pairs above
+	are treated as homo chains (TM=1.0).
 
 	returns (tm_scores, seq_identity) both (C, C) float32 arrays
 	where C = len(chain_ids). array index order matches chain_ids.
@@ -178,62 +188,41 @@ def compute_chain_similarities(
 		return tm_scores, seq_identity
 
 	# extract CA coords and sequences per chain
+	# full sequences for parasail, CA-filtered sequences for tmtools
 	ca_coords = []
-	sequences = []
+	ca_sequences = []
+	full_sequences = []
 	for cid in chain_ids:
 		chain = chains_data[cid]
 		coords = chain[ChainKey.COORDS]      # (L, 14, 3)
 		mask = chain[ChainKey.ATOM_MASK]      # (L, 14)
+		seq = chain[ChainKey.SEQUENCE]
 		# CA is atom index 1
 		ca_mask = mask[:, 1]
 		ca_xyz = coords[ca_mask, 1, :]
 		ca_coords.append(ca_xyz)
-		sequences.append(chain[ChainKey.SEQUENCE])
+		ca_sequences.append("".join(aa for aa, has_ca in zip(seq, ca_mask) if has_ca))
+		full_sequences.append(seq)
 
-	# group chains by sequence — identical sequences get deduped
-	seq_to_indices: dict[str, list[int]] = {}
-	for idx, seq in enumerate(sequences):
-		seq_to_indices.setdefault(seq, []).append(idx)
-
-	unique_seqs = list(seq_to_indices.keys())
-
-	# fast path: all chains share the same sequence (homo-oligomer)
-	if len(unique_seqs) == 1:
-		return np.ones((C, C), dtype=np.float32), np.ones((C, C), dtype=np.float32)
-
-	# fill within-group pairs with 1.0
-	for indices in seq_to_indices.values():
-		for a in indices:
-			for b in indices:
-				tm_scores[a, b] = 1.0
-				seq_identity[a, b] = 1.0
-
-	# compute alignments only between unique-sequence representatives
+	# compute sequence identity for all unique pairs, only run TM-align
+	# for pairs below the similarity threshold
 	matrix = parasail.blosum62
-	unique_groups = list(seq_to_indices.values())
-
-	for gi in range(len(unique_groups)):
-		for gj in range(gi + 1, len(unique_groups)):
-			rep_i = unique_groups[gi][0]
-			rep_j = unique_groups[gj][0]
-
-			# tm-score between representatives
-			result = tmtools.tm_align(ca_coords[rep_i], ca_coords[rep_j], sequences[rep_i], sequences[rep_j])
-			tm_ij = result.tm_norm_chain1
-			tm_ji = result.tm_norm_chain2
-
-			# sequence identity between representatives
-			res = parasail.nw_stats_striped_16(sequences[rep_i], sequences[rep_j], gap_open, gap_extend, matrix)
-			max_len = max(len(sequences[rep_i]), len(sequences[rep_j]))
+	for i in range(C):
+		for j in range(i + 1, C):
+			res = parasail.nw_stats_striped_16(full_sequences[i], full_sequences[j], gap_open, gap_extend, matrix)
+			max_len = max(len(full_sequences[i]), len(full_sequences[j]))
 			si_val = res.similar / max_len
 
-			# broadcast to all member pairs
-			for a in unique_groups[gi]:
-				for b in unique_groups[gj]:
-					tm_scores[a, b] = tm_ij
-					tm_scores[b, a] = tm_ji
-					seq_identity[a, b] = si_val
-					seq_identity[b, a] = si_val
+			seq_identity[i, j] = si_val
+			seq_identity[j, i] = si_val
+
+			if si_val >= skip_tm_at_seqsim:
+				tm_scores[i, j] = 1.0
+				tm_scores[j, i] = 1.0
+			else:
+				result = tmtools.tm_align(ca_coords[i], ca_coords[j], ca_sequences[i], ca_sequences[j])
+				tm_scores[i, j] = result.tm_norm_chain1
+				tm_scores[j, i] = result.tm_norm_chain2
 
 	return tm_scores, seq_identity
 

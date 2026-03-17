@@ -161,32 +161,33 @@ class PDBData:
 			logger.warning("chain %s not found in protein, skipping", chain)
 			return None
 
-		# find assemblies containing this chain
+		# find assemblies where any generator contains the target chain
 		assemblies = self._pdb_dict[ProteinKey.ASSEMBLIES]
 		valid_asmb_ids = [
-			i for i, a in enumerate(assemblies)
-			if chain in a[ProteinKey.CHAINS]
+			i for i, asmb in enumerate(assemblies)
+			if any(chain in gen[ProteinKey.CHAINS] for gen in asmb)
 		]
 
 		# pick an assembly (or use chain alone with identity xform)
 		if valid_asmb_ids:
 			asmb_id = random.choice(valid_asmb_ids)
-			asmb = assemblies[asmb_id]
-			asmb_chains = list(asmb[ProteinKey.CHAINS])
+			generators = assemblies[asmb_id]
+			# all unique chains across generators
+			asmb_chains = list(dict.fromkeys(c for gen in generators for c in gen[ProteinKey.CHAINS]))
 		else:
 			asmb_id = -1
+			generators = None
 			asmb_chains = [chain]
 
 		# shuffle but keep target chain first
-		asmb_chains = [chain] + random.sample(
-			[c for c in asmb_chains if c != chain],
-			k=len(asmb_chains) - 1,
-		)
+		other = [c for c in asmb_chains if c != chain]
+		asmb_chains = [chain] + random.sample(other, k=len(other))
 
 		labels_list = []
 		coords_list = []
 		atom_mask_list = []
 		chain_info = []
+		actual_chains = []
 		trgt_chain_idx = self._chain_to_idx[chain]
 
 		for asmb_chain in asmb_chains:
@@ -205,6 +206,7 @@ class PDBData:
 			coords_list.append(coords)
 			atom_mask_list.append(mask)
 			chain_info.append((self._chain_to_idx[asmb_chain], mask.shape[0]))
+			actual_chains.append(asmb_chain)
 
 		if not labels_list:
 			logger.warning("no valid chain data for chain %s (asmb_id=%d), skipping", chain, asmb_id)
@@ -223,16 +225,23 @@ class PDBData:
 		else:
 			homo_chains = np.array([trgt_chain_idx], dtype=np.intp)
 
-		# assembly transform
+		# build per-generator info: (chain_positions, transforms)
+		chain_name_to_pos = {c: i for i, c in enumerate(actual_chains)}
 		if self._asymmetric_units_only or asmb_id == -1:
-			asmb_xform = np.eye(4, dtype=np.float32)[np.newaxis]
+			generator_info = [(list(range(len(actual_chains))), np.eye(4, dtype=np.float32)[np.newaxis])]
 		else:
-			asmb_xform = asmb[ProteinKey.ASMB_XFORMS]
+			generator_info = []
+			for gen in generators:
+				gen_chain_positions = [chain_name_to_pos[c] for c in gen[ProteinKey.CHAINS] if c in chain_name_to_pos]
+				if gen_chain_positions:
+					generator_info.append((gen_chain_positions, gen[ProteinKey.ASMB_XFORMS]))
+			if not generator_info:
+				generator_info = [(list(range(len(actual_chains))), np.eye(4, dtype=np.float32)[np.newaxis])]
 
 		return Assembly(
 			coords, labels, atom_mask,
 			chain_info, trgt_chain_idx, homo_chains,
-			asmb_xform, self._max_seq_size, self._min_seq_size,
+			generator_info, self._max_seq_size, self._min_seq_size,
 		)
 
 
@@ -436,7 +445,7 @@ class Assembly:
 		self,
 		coords: Float[A, "L 14 3"], labels: Int[A, "L"], atom_mask: Bool[A, "L 14"],
 		chain_info: List[Tuple[int, int]], trgt_chain: int, homo_chains: Int[A, "H"],
-		asmb_xform: Float[A, "N 4 4"], max_seq_size: int, min_seq_size: int = 0,
+		generator_info: List[Tuple[List[int], Any]], max_seq_size: int, min_seq_size: int = 0,
 	) -> None:
 
 		self.coords = coords
@@ -447,7 +456,7 @@ class Assembly:
 		self._trgt_chain = trgt_chain
 		self._homo_chains = homo_chains
 
-		self.asmb_xform = asmb_xform
+		self._generator_info = generator_info
 		self._min_seq_size = min_seq_size
 
 		self._crop(max_seq_size)
@@ -458,11 +467,11 @@ class Assembly:
 		coords = torch.from_numpy(self.coords).float()
 		labels = torch.from_numpy(self.labels).long()
 
-		# compute seq idxs and chain idxs, note that need to crop in case labels was cropped earlier
+		# compute seq idxs and chain idxs, crop in case labels was truncated
 		seq_idx = torch.cat([torch.arange(size) for _, size in self._chain_info], dim=0)[:labels.size(0)].long()
 		chain_idx = torch.cat([torch.full((size,), idx) for idx, size in self._chain_info], dim=0)[:labels.size(0)].long()
 
-		# make the masks to remove invalid (no coords)
+		# remove residues missing backbone atoms
 		atom_mask = torch.from_numpy(self.atom_mask).bool()
 		valid_mask = atom_mask[..., :3].all(dim=-1)
 
@@ -471,19 +480,54 @@ class Assembly:
 		seq_idx = seq_idx[valid_mask]
 		chain_idx = chain_idx[valid_mask]
 
-		# perform the xform on coords and adjust the other tensors accordingly
-		asmb_xform = torch.from_numpy(self.asmb_xform).float()
+		# per-generator expansion: each generator transforms its own chain subset
+		expanded_coords = []
+		expanded_labels = []
+		expanded_seq_idx = []
+		expanded_chain_idx = []
 
-		N, A, S = coords.shape
-		num_copies = asmb_xform.size(0)
+		for chain_positions, xforms in self._generator_info:
+			gen_chain_idx_vals = set(
+				self._chain_info[p][0] for p in chain_positions if p < len(self._chain_info)
+			)
+			gen_mask = torch.zeros(chain_idx.size(0), dtype=torch.bool)
+			for val in gen_chain_idx_vals:
+				gen_mask |= (chain_idx == val)
 
-		R = asmb_xform[:, :3, :3]
-		T = asmb_xform[:, :3, 3]
+			gen_coords = coords[gen_mask]
+			gen_labels = labels[gen_mask]
+			gen_seq_idx = seq_idx[gen_mask]
+			gen_chain_idx = chain_idx[gen_mask]
 
-		coords = (torch.einsum("bij,raj->brai", R, coords) + T.view(num_copies, 1, 1, 3)).reshape(N * num_copies, A, S)
-		labels = labels.repeat(num_copies)
-		seq_idx = seq_idx.repeat(num_copies)
-		chain_idx = chain_idx.repeat(num_copies)
+			if gen_coords.size(0) == 0:
+				continue
+
+			xforms_t = torch.from_numpy(xforms).float()
+			num_copies = xforms_t.size(0)
+			R = xforms_t[:, :3, :3]
+			t_vec = xforms_t[:, :3, 3]
+
+			M, N_atoms, S = gen_coords.shape
+			gen_coords = (
+				torch.einsum("bij,raj->brai", R, gen_coords) + t_vec.view(num_copies, 1, 1, 3)
+			).reshape(M * num_copies, N_atoms, S)
+			gen_labels = gen_labels.repeat(num_copies)
+			gen_seq_idx = gen_seq_idx.repeat(num_copies)
+			gen_chain_idx = gen_chain_idx.repeat(num_copies)
+
+			expanded_coords.append(gen_coords)
+			expanded_labels.append(gen_labels)
+			expanded_seq_idx.append(gen_seq_idx)
+			expanded_chain_idx.append(gen_chain_idx)
+
+		if not expanded_coords:
+			logger.warning("no valid residues after generator expansion, skipping")
+			return None
+
+		coords = torch.cat(expanded_coords, dim=0)
+		labels = torch.cat(expanded_labels, dim=0)
+		seq_idx = torch.cat(expanded_seq_idx, dim=0)
+		chain_idx = torch.cat(expanded_chain_idx, dim=0)
 
 		trgt_mask = chain_idx == self._trgt_chain
 		homo_mask = torch.isin(chain_idx, torch.from_numpy(self._homo_chains))
@@ -501,17 +545,43 @@ class Assembly:
 
 	@torch.no_grad()
 	def _crop(self, max_seq_size: int) -> None:
+		N = self.coords.shape[0]
 
-		N, A, S = self.coords.shape
-		num_copies = min(max_seq_size // N, self.asmb_xform.shape[0])
+		# compute total expanded size across all generators
+		total_expanded = sum(
+			sum(self._chain_info[p][1] for p in positions) * xforms.shape[0]
+			for positions, xforms in self._generator_info
+		)
 
-		if num_copies == 0:
-			self.coords = self.coords[:max_seq_size, :, :]
+		if total_expanded <= max_seq_size:
+			return
+
+		# fall back to asymmetric unit: single identity transform over all chains
+		self._generator_info = [
+			(list(range(len(self._chain_info))), np.eye(4, dtype=np.float32)[np.newaxis])
+		]
+
+		if N > max_seq_size:
+			self.coords = self.coords[:max_seq_size]
 			self.labels = self.labels[:max_seq_size]
-			self.atom_mask = self.atom_mask[:max_seq_size, :]
-			self.asmb_xform = np.expand_dims(np.eye(4), 0)
-		else:
-			self.asmb_xform = self.asmb_xform[:num_copies, :, :]
+			self.atom_mask = self.atom_mask[:max_seq_size]
+			remaining = max_seq_size
+			truncated_info = []
+			for chain_idx_val, size in self._chain_info:
+				if remaining <= 0:
+					break
+				used = min(size, remaining)
+				truncated_info.append((chain_idx_val, used))
+				remaining -= used
+			self._chain_info = truncated_info
 
 	def __len__(self) -> int:
-		return self.labels.shape[0] * self.asmb_xform.shape[0]
+		total = 0
+		for chain_positions, xforms in self._generator_info:
+			gen_residues = sum(
+				self._chain_info[p][1]
+				for p in chain_positions
+				if p < len(self._chain_info)
+			)
+			total += gen_residues * xforms.shape[0]
+		return total
