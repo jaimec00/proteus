@@ -12,7 +12,7 @@ import logging
 
 import polars as pl
 
-from proteus.static.constants import seq_2_lbls, aa_2_lbl
+from proteus.static.constants import seq_2_lbls, aa_2_lbl, canonical_aas
 from proteus.types import A, T, Float, Int, Bool, List, Dict, Tuple, Generator, Optional, Any
 from proteus.data.construct_registry import ConstructRegistry, InputNames
 from proteus.data.data_constants import DataPath, IndexCol, ProteinKey, ChainKey
@@ -158,7 +158,7 @@ class PDBData:
 		chains_data = self._pdb_dict[ProteinKey.CHAINS]
 
 		if chain not in chains_data:
-			logger.warning("chain %s not found in protein, skipping", chain)
+			logger.debug("chain %s not found in protein, skipping", chain)
 			return None
 
 		# find assemblies where any generator contains the target chain
@@ -209,7 +209,7 @@ class PDBData:
 			actual_chains.append(asmb_chain)
 
 		if not labels_list:
-			logger.warning("no valid chain data for chain %s (asmb_id=%d), skipping", chain, asmb_id)
+			logger.debug("no valid chain data for chain %s (asmb_id=%d), skipping", chain, asmb_id)
 			return None
 
 		labels = np.concatenate(labels_list, axis=0)
@@ -521,7 +521,7 @@ class Assembly:
 			expanded_chain_idx.append(gen_chain_idx)
 
 		if not expanded_coords:
-			logger.warning("no valid residues after generator expansion, skipping")
+			logger.debug("no valid residues after generator expansion, skipping")
 			return None
 
 		coords = torch.cat(expanded_coords, dim=0)
@@ -531,14 +531,14 @@ class Assembly:
 
 		trgt_mask = chain_idx == self._trgt_chain
 		homo_mask = torch.isin(chain_idx, torch.from_numpy(self._homo_chains))
-		caa_mask = labels != aa_2_lbl("X")
+		caa_mask = labels < len(canonical_aas)
 
 		result = ConstructRegistry.construct(
 			coords, labels, seq_idx, chain_idx, trgt_mask, homo_mask, caa_mask, atom_mask
 		)
 
 		if result["labels"].size(0) < self._min_seq_size:
-			logger.warning("sample below min_seq_size (%d < %d), skipping", result["labels"].size(0), self._min_seq_size)
+			logger.debug("sample below min_seq_size (%d < %d), skipping", result["labels"].size(0), self._min_seq_size)
 			return None
 
 		return result

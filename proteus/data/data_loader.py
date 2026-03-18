@@ -52,7 +52,7 @@ class DataFilterCfg:
 
 @dataclass
 class DataHolderCfg:
-	s3_bucket: S3Path
+	s3_bucket: str
 
 	cluster_col: str = "foldseek_70"
 	cluster_split_cols: List[str] = field(default_factory=lambda: ["foldseek_70", "mmseqs_30"])
@@ -177,6 +177,7 @@ class DataHolder:
 			collate_fn=lambda x: x,
 			prefetch_factor=cfg.prefetch_factor if cfg.num_workers else None,
 			persistent_workers=cfg.num_workers > 0,
+			multiprocessing_context="spawn" if cfg.num_workers > 0 else None,
 		)
 
 		self.train = init_loader(self._train_data)
