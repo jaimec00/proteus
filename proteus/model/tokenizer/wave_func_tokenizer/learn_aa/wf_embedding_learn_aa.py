@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from . import _C as wf_embedding_learn_aa_kernel
+import proteus.model.tokenizer.wave_func_tokenizer.learn_aa._C as wf_embedding_learn_aa_kernel
 
 def wf_embedding_learn_aa(coordsA, coordsB, aa_labels, aa_magnitudes, wavenumbers, cu_seqlens, dropout_p=0.0):
     return _wf_embedding_learn_aa.apply(coordsA, coordsB, aa_labels, aa_magnitudes, wavenumbers, cu_seqlens, dropout_p)
