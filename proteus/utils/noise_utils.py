@@ -52,7 +52,7 @@ class NoiseSchedule:
     ) -> Tuple[Int[T, "BL"], Bool[T, "BL"]]:
         
         t = self._sample_t(sample_idx, cu_seqlens)
-        corruption = self._get_corruption(t)
+        corruption = self._get_corruption(t).float()
         is_corrupted = self._sample_corruption(corruption, also_mask, only_mask)        
         corrupted_labels = self._corrupt(labels, is_corrupted)
 

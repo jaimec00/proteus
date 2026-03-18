@@ -5,7 +5,7 @@ from typing import List
 
 @dataclass
 class DefaultData(DataHolderCfg):
-	s3_bucket: str = "s3://proteus-data"
+	s3_bucket: str = "s3://proteus-data-bucket"
 	cluster_col: str = "foldseek_70"
 	cluster_split_cols: List[str] = field(default_factory=lambda: ["foldseek_70", "mmseqs_30"])
 	train_val_test_split: List[float] = field(default_factory=lambda: [0.9, 0.05, 0.05])
@@ -16,30 +16,30 @@ class DefaultData(DataHolderCfg):
 	filters: DataFilterCfg = field(default_factory=DataFilterCfg)
 	homo_thresh: float = 0.7
 	asymmetric_units_only: bool = False
-	num_workers: int = 16
+	num_workers: int = 0
 	prefetch_factor: int = 8
 	rng_seed: int = 6000
 	buffer_size: int = 64
 
 @dataclass
 class XSmallSeqData(DefaultData):
-	s3_bucket: str = "s3://proteus-data"
+	s3_bucket: str = "s3://proteus-data-bucket"
 	max_seq_size: int = 128
 @dataclass
 class SmallSeqData(DefaultData):
-	s3_bucket: str = "s3://proteus-data"
+	s3_bucket: str = "s3://proteus-data-bucket"
 	max_seq_size: int = 512
 @dataclass
 class MediumSeqData(DefaultData):
-	s3_bucket: str = "s3://proteus-data"
+	s3_bucket: str = "s3://proteus-data-bucket"
 	max_seq_size: int = 1024
 @dataclass
 class LargeSeqData(DefaultData):
-	s3_bucket: str = "s3://proteus-data"
+	s3_bucket: str = "s3://proteus-data-bucket"
 	max_seq_size: int = 8192
 @dataclass
 class XLargeSeqData(DefaultData):
-	s3_bucket: str = "s3://proteus-data"
+	s3_bucket: str = "s3://proteus-data-bucket"
 	max_seq_size: int = 8192
 
 def register_data():
