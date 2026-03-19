@@ -96,4 +96,4 @@ class NoiseSchedule:
 
     @torch.no_grad()
     def constant(self, t):
-        return torch.full_like(t, self.mask_rate)
+        return torch.full_like(t, self.corruption_rate)
