@@ -51,7 +51,7 @@ class proteusAIPretrainBERTCfg(proteusAIPretrainBaseCfg):
             max_wl=MAX_WL, 
             base_wl=BASE_WL
         ),
-        noise_schedule=ConstantNoiseScheduleCfg(mask_rate=MASK_RATE),
+        noise_schedule=ConstantNoiseScheduleCfg(corruption_rate=MASK_RATE),
         transformer=TransformerModelCfg(
             transformer_block=TransformerBlockCfg(
                 attn=MHACfg(heads=HEADS)
